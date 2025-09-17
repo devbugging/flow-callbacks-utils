@@ -52,6 +52,13 @@
         .stat-card.pending { border-left-color: #ffc107; }
         .stat-card.executed { border-left-color: #007bff; }
         .stat-card.canceled { border-left-color: #dc3545; }
+        .stat-card.status-ok { border-left-color: #28a745; }
+        .stat-card.status-fail { border-left-color: #dc3545; }
+        .stat-card.status-unknown { border-left-color: #6c757d; }
+        
+        .status-ok .count { color: #28a745; font-weight: bold; }
+        .status-fail .count { color: #dc3545; font-weight: bold; }
+        .status-unknown .count { color: #6c757d; font-weight: bold; }
         
         .controls {
             margin-bottom: 20px;
@@ -389,6 +396,10 @@
                 <h3>Failed</h3>
                 <div class="count" id="failedExecutionsCount">0</div>
             </div>
+            <div class="stat-card status-unknown" id="systemStatusCard">
+                <h3>System Status</h3>
+                <div class="count" id="systemStatusCount">UNKNOWN</div>
+            </div>
         </div>
         
         <div class="controls">
@@ -492,6 +503,21 @@
             document.getElementById('successfulExecutionsCount').textContent = successful;
             document.getElementById('failedExecutionsCount').textContent = failed;
             document.getElementById('lastBlock').textContent = stats.lastBlock || '-';
+            
+            // Update system status
+            const systemStatus = stats.system_status || 'UNKNOWN';
+            document.getElementById('systemStatusCount').textContent = systemStatus;
+            
+            // Update status card styling
+            const statusCard = document.getElementById('systemStatusCard');
+            statusCard.className = 'stat-card'; // Reset classes
+            if (systemStatus === 'OK') {
+                statusCard.classList.add('status-ok');
+            } else if (systemStatus === 'FAIL') {
+                statusCard.classList.add('status-fail');
+            } else {
+                statusCard.classList.add('status-unknown');
+            }
         }
 
         function filterAndDisplayEvents() {

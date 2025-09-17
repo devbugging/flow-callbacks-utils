@@ -114,7 +114,7 @@ func (m *Monitor) initGRPCClient() error {
 	case "migrationnet":
 		accessNode = "access-001.migrationtestnet1.nodes.onflow.org:9000"
 	case "testnet":
-		accessNode = "access.devnet.nodes.onflow.org:9000"
+		accessNode = "access-001.devnet53.nodes.onflow.org:9000"
 	case "localnet", "emulator":
 		accessNode = "localhost:3569"
 	default:
@@ -190,9 +190,7 @@ func (m *Monitor) saveDatabase() error {
 // hexToBytes converts a hex string to bytes, handling both 0x-prefixed and plain hex
 func hexToBytes(hexStr string) ([]byte, error) {
 	// remove 0x prefix if present
-	if strings.HasPrefix(hexStr, "0x") {
-		hexStr = hexStr[2:]
-	}
+	hexStr = strings.TrimPrefix(hexStr, "0x")
 
 	// validate length (should be 64 characters for Flow IDs)
 	if len(hexStr) != 64 {
@@ -397,6 +395,33 @@ func (m *Monitor) getTransactionStatus(txID string) string {
 		}
 	}
 
+	return "UNKNOWN"
+}
+
+// checkSystemStatus executes the check_status.cdc script
+func (m *Monitor) checkSystemStatus() string {
+	// Execute the check_status.cdc script using flow CLI
+	cmd := exec.Command("flow", "scripts", "execute", "check_status.cdc", "-n", m.network)
+	output, err := cmd.CombinedOutput()
+
+	// Check if the script executed successfully (no panic)
+	outputStr := string(output)
+	if err != nil {
+		// If there's an error, check if it's a panic or other issue
+		if strings.Contains(outputStr, "panic") || strings.Contains(outputStr, "Expected empty result") {
+			return "FAIL"
+		}
+		// Other errors (network, etc.) don't indicate system failure
+		log.Printf("Status check error (non-panic): %v, output: %s", err, outputStr)
+		return "UNKNOWN"
+	}
+
+	// If no error and no panic, the check passed
+	if strings.Contains(outputStr, "Success:") || !strings.Contains(outputStr, "panic") {
+		return "OK"
+	}
+
+	// Default to unknown if we can't determine the result
 	return "UNKNOWN"
 }
 
@@ -733,7 +758,6 @@ func (m *Monitor) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if err := tmpl.Execute(w, data); err != nil {
 		http.Error(w, fmt.Sprintf("Error executing template: %v", err), http.StatusInternalServerError)
 	}
-	return
 }
 
 // handleEvents serves the events API endpoint
@@ -769,6 +793,9 @@ func (m *Monitor) handleStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Perform system status check
+	systemStatus := m.checkSystemStatus()
+
 	stats["scheduled"] = typeCounts["scheduled"]
 	stats["pending"] = typeCounts["pending"]
 	stats["executed"] = typeCounts["executed"]
@@ -778,6 +805,7 @@ func (m *Monitor) handleStats(w http.ResponseWriter, r *http.Request) {
 	stats["total"] = len(m.db.Events)
 	stats["successful_executions"] = successfulExecutions
 	stats["failed_executions"] = failedExecutions
+	stats["system_status"] = systemStatus
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
