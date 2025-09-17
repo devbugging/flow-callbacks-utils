@@ -1,0 +1,116 @@
+{
+	"contracts": {
+		"FlowFees": {
+			"source": "",
+			"aliases": {
+				"emulator": "e5a8b7f23e8b548f",
+				"localnet": "e5a8b7f23e8b548f",
+				"migrationnet": "912d5440f7e3769e",
+				"testnet": "912d5440f7e3769e"
+			}
+		},
+		"FlowStorageFees": {
+			"source": "",
+			"aliases": {
+				"emulator": "f8d6e0586b0a20c7",
+				"localnet": "f8d6e0586b0a20c7",
+				"migrationnet": "8c5303eaa26202d6",
+				"testnet": "8c5303eaa26202d6"
+			}
+		},
+		"FlowToken": {
+			"source": "./FlowToken.cdc",
+			"aliases": {
+				"emulator": "0ae53cb6e3f42a79",
+				"localnet": "0ae53cb6e3f42a79",
+				"migrationnet": "7e60df042a9c0868",
+				"testnet": "7e60df042a9c0868"
+			}
+		},
+		"FlowTransactionScheduler": {
+			"source": "./FlowTransactionScheduler.cdc",
+			"aliases": {
+				"emulator": "f8d6e0586b0a20c7",
+				"localnet": "f8d6e0586b0a20c7",
+				"migrationnet": "8c5303eaa26202d6",
+				"testnet": "f8d6e0586b0a20c7"
+			}
+		},
+		"FungibleToken": {
+			"source": "./FungibleToken.cdc",
+			"aliases": {
+				"emulator": "ee82856bf20e2aa6",
+				"localnet": "ee82856bf20e2aa6",
+				"migrationnet": "9a0766d93b6608b7",
+				"testnet": "9a0766d93b6608b7"
+			}
+		},
+		"TestFlowCallbackHandler": {
+			"source": "./TestFlowCallbackHandler.cdc",
+			"aliases": {
+				"emulator": "f8d6e0586b0a20c7",
+				"localnet": "f8d6e0586b0a20c7",
+				"migrationnet": "373ce83aef691d2d",
+				"testnet": "f8d6e0586b0a20c7"
+			}
+		},
+		"ViewResolver": {
+			"source": "",
+			"aliases": {
+				"emulator": "f8d6e0586b0a20c7",
+				"localnet": "f8d6e0586b0a20c7",
+				"migrationnet": "631e88ae7f1d7c20",
+				"testnet": "631e88ae7f1d7c20"
+			}
+		}
+	},
+	"networks": {
+		"emulator": "127.0.0.1:3569",
+		"localnet": "127.0.0.1:4001",
+		"mainnet": "access.mainnet.nodes.onflow.org:9000",
+		"migrationnet": "access-001.migrationtestnet1.nodes.onflow.org:9000",
+		"testing": "127.0.0.1:3569",
+		"testnet": "access.devnet.nodes.onflow.org:9000"
+	},
+	"accounts": {
+		"emulator-account": {
+			"address": "f8d6e0586b0a20c7",
+			"key": {
+				"type": "file",
+				"location": "emulator-account.pkey"
+			}
+		},
+		"migration": {
+			"address": "373ce83aef691d2d",
+			"key": "a1f7d2a08dea4ec663142d844d6a705a2cc518be64d201677b6adaae4bef67a9"
+		},
+		"service": {
+			"address": "f8d6e0586b0a20c7",
+			"key": {
+				"type": "hex",
+				"hashAlgorithm": "SHA2_256",
+				"privateKey": "8ae3d0461cfed6d6f49bfc25fa899351c39d1bd21fdba8c87595b6c49bb4cc43"
+			}
+		}
+	},
+	"deployments": {
+		"emulator": {
+			"emulator-account": [
+				"FlowTransactionScheduler",
+				"TestFlowCallbackHandler"
+			]
+		},
+		"localnet": {
+			"service": [
+				"FlowTransactionScheduler",
+				"TestFlowCallbackHandler"
+			]
+		},
+		"migrationnet": {
+			"migration": [
+				"TestFlowCallbackHandler",
+				"FlowTransactionScheduler"
+			]
+		}
+	}
+}
