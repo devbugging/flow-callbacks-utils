@@ -167,3 +167,20 @@ go run monitor.go -network testnet -start 100000  # start parameter ignored
 ```
 
 This ensures that existing monitoring sessions are never disrupted by accidentally providing a `-start` parameter.
+
+
+
+# Stop the service
+sudo systemctl stop flow-monitor
+
+# Reload systemd configuration
+sudo systemctl daemon-reload
+
+# Start the service
+sudo systemctl start flow-monitor
+
+# Check status
+sudo systemctl status flow-monitor
+
+# View logs
+sudo journalctl -u flow-monitor -f

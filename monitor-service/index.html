@@ -191,6 +191,23 @@
             font-size: 14px;
         }
         
+        .warning-banner {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 4px;
+            padding: 15px;
+            margin-bottom: 20px;
+            color: #856404;
+            font-size: 14px;
+            text-align: center;
+        }
+        
+        .warning-banner .warning-title {
+            font-weight: bold;
+            color: #533f03;
+            margin-bottom: 5px;
+        }
+        
         .failed-execution {
             background-color: #ffe6e6 !important;
         }
@@ -327,6 +344,11 @@
 </head>
 <body>
     <div class="container">
+        
+        <div class="warning-banner">
+            <div class="warning-title">⚠️ EXPERIMENTAL FEATURE</div>
+            <div>This monitoring interface is experimental and may contain issues and bugs. It should only be used for development purposes, not production use.</div>
+        </div>
     
         <div class="network-info">
             <strong>Network:</strong> <span id="network">{{.Network}}</span> | 
