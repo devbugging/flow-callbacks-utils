@@ -1,27 +1,3 @@
-// FlowTransactionScheduler Stress Test Suite
-//
-// This package contains comprehensive stress tests for the FlowTransactionScheduler
-// using flowkit v2 for efficient transaction submission and event monitoring.
-//
-// Test Suites:
-// - Test Suite 0: Single Transaction Sanity Test (validates basic functionality)
-// - Test Suite 1: Slot Saturation Test (tests capacity limits)
-// - Test Suite 2: Burst Scheduling Test (tests concurrent throughput)
-// - Test Suite 4: Collection Limit Test (tests transaction count limits)
-// - Test Suite 5: Priority Starvation Test (tests priority rescheduling)
-// - Test Suite 7: Data Payload Stress Test (tests data size limits)
-//
-// Usage:
-//
-//	go test -run TestSingleTransactionSanity  # Quick sanity check
-//	go test -run TestSlotSaturation          # Test slot capacity
-//	go test -run TestBurstScheduling         # Test concurrent load
-//
-// Features:
-// - Concurrent transaction scheduling with controlled concurrency
-// - Proper sequence number management for parallel operations
-// - Event-based execution tracking and verification
-// - Comprehensive error handling and performance metrics
 package main
 
 import (
@@ -39,6 +15,7 @@ import (
 
 	"github.com/onflow/cadence"
 	"github.com/onflow/flow-go-sdk"
+	"github.com/onflow/flow-go-sdk/crypto"
 	"github.com/onflow/flowkit/v2"
 	"github.com/onflow/flowkit/v2/accounts"
 	"github.com/onflow/flowkit/v2/config"
@@ -61,8 +38,13 @@ type StressTest struct {
 	flowkit        *flowkit.Flowkit
 	ctx            context.Context
 	network        config.Network
+	account        *accounts.Account
 	serviceAccount *flow.Account
 	scheduleScript string
+
+	keyCount        int
+	testAccount     *flow.Account
+	testAccountKeys []crypto.PrivateKey
 }
 
 func NewStressTest(t *testing.T) *StressTest {
@@ -94,6 +76,9 @@ func NewStressTest(t *testing.T) *StressTest {
 	}
 	st.currentSequence = seq
 	st.sequenceNumber.Store(seq)
+
+	st.keyCount = 20
+	st.createTestAccountMultipleKeys()
 
 	// Load the schedule script
 	err = st.loadScheduleScript()
@@ -145,7 +130,42 @@ func (st *StressTest) initializeFlowkit() error {
 		return fmt.Errorf("failed to get Flow account: %w", err)
 	}
 	st.serviceAccount = flowAccount
+	st.account = account
 
+	return nil
+}
+
+func (st *StressTest) createTestAccountMultipleKeys() error {
+	randSeed := make([]byte, 32)
+	rand.Read(randSeed)
+	publicKeys := make([]accounts.PublicKey, st.keyCount)
+
+	for i := 0; i < st.keyCount; i++ {
+		pkey, err := st.flowkit.GenerateKey(st.ctx, crypto.ECDSA_P256, string(randSeed))
+		if err != nil {
+			return fmt.Errorf("failed to generate key: %w", err)
+		}
+
+		st.testAccountKeys = append(st.testAccountKeys, pkey)
+
+		publicKeys[i] = accounts.PublicKey{
+			Public:   pkey.PublicKey(),
+			Weight:   flow.AccountKeyWeightThreshold,
+			SigAlgo:  crypto.ECDSA_P256,
+			HashAlgo: crypto.SHA2_256,
+		}
+	}
+
+	testAccount, _, err := st.flowkit.CreateAccount(
+		st.ctx,
+		st.account,
+		publicKeys,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create test account: %w", err)
+	}
+
+	st.testAccount = testAccount
 	return nil
 }
 
@@ -167,7 +187,6 @@ func (st *StressTest) getCurrentSequenceNumber() (uint64, error) {
 	// Use the first key's sequence number
 	return st.serviceAccount.Keys[0].SequenceNumber, nil
 }
-
 
 func (st *StressTest) scheduleCallbackWithSequence(data string, priority uint8, futureSeconds int, effort string) (ScheduledCallback, error) {
 	// Lock for sequence number management in concurrent scenarios

@@ -184,3 +184,6 @@ sudo systemctl status flow-monitor
 
 # View logs
 sudo journalctl -u flow-monitor -f
+
+# Location 
+`/home/monitor-user/apps/flow-callbacks-utils/monitor-service/monitor`
