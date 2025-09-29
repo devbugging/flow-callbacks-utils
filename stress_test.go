@@ -3,7 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
-	"math/rand"
+	cryptorand "crypto/rand"
+	mathrand "math/rand"
 	"os"
 	"regexp"
 	"strconv"
@@ -30,9 +31,7 @@ type StressTest struct {
 	startBlockHeight    uint64
 	executedCallbackIDs []uint64 // Track which callbacks were actually executed
 	scheduledCallbacks  []ScheduledCallback
-	mu                  sync.Mutex     // Protect concurrent access
-	sequenceNumber      *atomic.Uint64 // Track sequence numbers for transactions
-	currentSequence     uint64         // Current sequence number
+	mu                  sync.Mutex // Protect concurrent access
 
 	// Flowkit components
 	flowkit        *flowkit.Flowkit
@@ -45,6 +44,7 @@ type StressTest struct {
 	keyCount        int
 	testAccount     *flow.Account
 	testAccountKeys []crypto.PrivateKey
+	keyIndex        *atomic.Uint32 // Track which key to use next
 }
 
 func NewStressTest(t *testing.T) *StressTest {
@@ -52,7 +52,7 @@ func NewStressTest(t *testing.T) *StressTest {
 		t:                   t,
 		executedCallbackIDs: make([]uint64, 0),
 		scheduledCallbacks:  make([]ScheduledCallback, 0),
-		sequenceNumber:      &atomic.Uint64{},
+		keyIndex:            &atomic.Uint32{},
 		ctx:                 context.Background(),
 	}
 
@@ -69,16 +69,11 @@ func NewStressTest(t *testing.T) *StressTest {
 	}
 	st.startBlockHeight = startHeight
 
-	// Initialize sequence number
-	seq, err := st.getCurrentSequenceNumber()
-	if err != nil {
-		t.Fatalf("Failed to get current sequence number: %v", err)
-	}
-	st.currentSequence = seq
-	st.sequenceNumber.Store(seq)
-
 	st.keyCount = 20
-	st.createTestAccountMultipleKeys()
+	err = st.createTestAccountMultipleKeys()
+	if err != nil {
+		t.Fatalf("Failed to create test account with multiple keys: %v", err)
+	}
 
 	// Load the schedule script
 	err = st.loadScheduleScript()
@@ -86,7 +81,7 @@ func NewStressTest(t *testing.T) *StressTest {
 		t.Fatalf("Failed to load schedule script: %v", err)
 	}
 
-	t.Logf("Starting stress test from block height %d with sequence number %d", startHeight, seq)
+	t.Logf("Starting stress test from block height %d with %d keys available", startHeight, st.keyCount)
 
 	return st
 }
@@ -137,8 +132,9 @@ func (st *StressTest) initializeFlowkit() error {
 
 func (st *StressTest) createTestAccountMultipleKeys() error {
 	randSeed := make([]byte, 32)
-	rand.Read(randSeed)
+	cryptorand.Read(randSeed)
 	publicKeys := make([]accounts.PublicKey, st.keyCount)
+	st.testAccountKeys = make([]crypto.PrivateKey, 0, st.keyCount)
 
 	for i := 0; i < st.keyCount; i++ {
 		pkey, err := st.flowkit.GenerateKey(st.ctx, crypto.ECDSA_P256, string(randSeed))
@@ -178,29 +174,23 @@ func (st *StressTest) loadScheduleScript() error {
 	return nil
 }
 
-func (st *StressTest) getCurrentSequenceNumber() (uint64, error) {
-	// The service account was already fetched in initializeFlowkit
-	if len(st.serviceAccount.Keys) == 0 {
-		return 0, fmt.Errorf("no keys found for service account")
-	}
-
-	// Use the first key's sequence number
-	return st.serviceAccount.Keys[0].SequenceNumber, nil
+// getNextKeyIndex returns the next key index to use and rotates through available keys
+func (st *StressTest) getNextKeyIndex() int {
+	currentIndex := st.keyIndex.Add(1) - 1
+	return int(currentIndex) % st.keyCount
 }
 
-func (st *StressTest) scheduleCallbackWithSequence(data string, priority uint8, futureSeconds int, effort string) (ScheduledCallback, error) {
-	// Lock for sequence number management in concurrent scenarios
-	st.mu.Lock()
-	sequence := st.sequenceNumber.Add(1) - 1
-	st.mu.Unlock()
-
-	return st.scheduleCallbackWithPreAllocatedSequence(data, priority, futureSeconds, effort, sequence)
+func (st *StressTest) scheduleCallbackWithNextKey(data string, priority uint8, futureSeconds int, effort string) (ScheduledCallback, error) {
+	// Get next available key index
+	keyIndex := st.getNextKeyIndex()
+	st.t.Logf("Using key index %d for transaction", keyIndex)
+	return st.scheduleCallbackWithKey(data, priority, futureSeconds, effort, keyIndex)
 }
 
-func (st *StressTest) scheduleCallbackWithPreAllocatedSequence(data string, priority uint8, futureSeconds int, effort string, sequence uint64) (ScheduledCallback, error) {
+func (st *StressTest) scheduleCallbackWithKey(data string, priority uint8, futureSeconds int, effort string, keyIndex int) (ScheduledCallback, error) {
 	timestamp := float64(time.Now().Unix() + int64(futureSeconds))
 
-	st.t.Logf("Scheduling callback with data '%s' at timestamp %.1f, sequence %d", data, timestamp, sequence)
+	st.t.Logf("Scheduling callback with data '%s' at timestamp %.1f, key index %d", data, timestamp, keyIndex)
 
 	// Prepare transaction arguments
 	effortUint, _ := strconv.ParseUint(effort, 10, 64)
@@ -214,15 +204,12 @@ func (st *StressTest) scheduleCallbackWithPreAllocatedSequence(data string, prio
 		cadence.String(data),                          // String
 	}
 
-	// Get test account for signing
-	state, err := st.flowkit.State()
-	if err != nil {
-		return ScheduledCallback{}, fmt.Errorf("failed to get state: %w", err)
-	}
-
-	testAccount, err := state.Accounts().ByName("test")
-	if err != nil {
-		return ScheduledCallback{}, fmt.Errorf("failed to get test account: %w", err)
+	// Create a dynamic account for this specific key
+	hexKey := accounts.NewHexKeyFromPrivateKey(uint32(keyIndex), crypto.SHA2_256, st.testAccountKeys[keyIndex])
+	testAccount := &accounts.Account{
+		Name:    fmt.Sprintf("dynamic-key-%d", keyIndex),
+		Address: st.testAccount.Address,
+		Key:     hexKey,
 	}
 
 	// Create script
@@ -231,8 +218,8 @@ func (st *StressTest) scheduleCallbackWithPreAllocatedSequence(data string, prio
 		Args: arguments,
 	}
 
-	// Create account roles for transaction
-	accounts := transactions.AccountRoles{
+	// Create account roles for transaction using the specific key
+	acctRoles := transactions.AccountRoles{
 		Proposer:    *testAccount,
 		Authorizers: []accounts.Account{*testAccount},
 		Payer:       *testAccount,
@@ -241,7 +228,7 @@ func (st *StressTest) scheduleCallbackWithPreAllocatedSequence(data string, prio
 	// Send transaction using flowkit
 	_, result, err := st.flowkit.SendTransaction(
 		st.ctx,
-		accounts,
+		acctRoles,
 		script,
 		9999, // gas limit
 	)
@@ -510,8 +497,8 @@ func (st *StressTest) scheduleCallbacksConcurrently(requests []ScheduleRequest, 
 
 		st.t.Logf("Submitting burst transaction %d/%d", i+1, len(requests))
 
-		// Submit transaction immediately (no goroutine, no pre-allocation)
-		callback, err := st.scheduleCallbackWithSequence(
+		// Submit transaction immediately using next available key
+		callback, err := st.scheduleCallbackWithNextKey(
 			req.Data,
 			req.Priority,
 			req.FutureSeconds,
@@ -554,7 +541,7 @@ func TestSingleTransactionSanity(t *testing.T) {
 
 	// Schedule a single callback
 	startTime := time.Now()
-	callback, err := st.scheduleCallbackWithSequence(testData, 1, futureSeconds, "100")
+	callback, err := st.scheduleCallbackWithNextKey(testData, 1, futureSeconds, "100")
 	scheduleDuration := time.Since(startTime)
 
 	if err != nil {
@@ -687,7 +674,7 @@ func TestSlotSaturation(t *testing.T) {
 	// Try to schedule one more high priority - should fail
 	t.Logf("Attempting to schedule additional high priority transaction (should fail)")
 	data := fmt.Sprintf("slot-saturation-overflow-%d", time.Now().UnixNano())
-	_, err := st.scheduleCallbackWithSequence(data, 0, futureSeconds, "1000")
+	_, err := st.scheduleCallbackWithNextKey(data, 0, futureSeconds, "1000")
 	if err == nil {
 		t.Errorf("Expected slot saturation but was able to schedule additional transaction")
 	} else {
@@ -726,10 +713,10 @@ func TestBurstScheduling(t *testing.T) {
 	// Create burst requests with mixed priorities and random parameters
 	var burstRequests []ScheduleRequest
 	for i := 0; i < burstSize; i++ {
-		priority := uint8(i % 3)                        // Mix priorities (0, 1, 2)
-		effort := fmt.Sprintf("%d", 100+rand.Intn(900)) // Random effort 100-999
+		priority := uint8(i % 3)                            // Mix priorities (0, 1, 2)
+		effort := fmt.Sprintf("%d", 100+mathrand.Intn(900)) // Random effort 100-999
 		data := fmt.Sprintf("burst-%d-%d", i, time.Now().UnixNano())
-		timeVariation := rand.Intn(5) // Spread execution times over 5 seconds
+		timeVariation := mathrand.Intn(5) // Spread execution times over 5 seconds
 
 		burstRequests = append(burstRequests, ScheduleRequest{
 			Data:          data,
@@ -885,7 +872,7 @@ func TestPriorityStarvation(t *testing.T) {
 	t.Logf("Attempting to schedule medium priority transactions (should get different slot)")
 
 	mediumData := fmt.Sprintf("starvation-medium-%d", time.Now().UnixNano())
-	mediumCallback, err := st.scheduleCallbackWithSequence(mediumData, 1, futureSeconds, "6000")
+	mediumCallback, err := st.scheduleCallbackWithNextKey(mediumData, 1, futureSeconds, "6000")
 	if err != nil {
 		t.Logf("Failed to schedule medium priority: %v", err)
 	} else {
@@ -902,7 +889,7 @@ func TestPriorityStarvation(t *testing.T) {
 	t.Logf("Attempting to schedule low priority transactions (should get rescheduled)")
 
 	lowData := fmt.Sprintf("starvation-low-%d", time.Now().UnixNano())
-	lowCallback, err := st.scheduleCallbackWithSequence(lowData, 2, futureSeconds, "1000")
+	lowCallback, err := st.scheduleCallbackWithNextKey(lowData, 2, futureSeconds, "1000")
 	if err != nil {
 		t.Logf("Failed to schedule low priority: %v", err)
 	} else {
