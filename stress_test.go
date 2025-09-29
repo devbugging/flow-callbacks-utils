@@ -162,6 +162,84 @@ func (st *StressTest) createTestAccountMultipleKeys() error {
 	}
 
 	st.testAccount = testAccount
+	st.t.Logf("Created test account with address %s and %d keys", testAccount.Address.Hex(), st.keyCount)
+
+	// Fund the new account with 1 Flow token
+	err = st.fundTestAccount()
+	if err != nil {
+		return fmt.Errorf("failed to fund test account: %w", err)
+	}
+
+	return nil
+}
+
+func (st *StressTest) fundTestAccount() error {
+	st.t.Logf("Funding test account %s with 1.0 Flow tokens", st.testAccount.Address.Hex())
+
+	// Create Flow token transfer script (Cadence 1.0 syntax)
+	fundScript := `
+import FungibleToken from 0x9a0766d93b6608b7
+import FlowToken from 0x7e60df042a9c0868
+
+transaction(amount: UFix64, to: Address) {
+    let vault: @{FungibleToken.Vault}
+
+    prepare(signer: auth(BorrowValue) &Account) {
+        self.vault <- signer.storage.borrow<auth(FungibleToken.Withdraw) &FlowToken.Vault>(
+            from: /storage/flowTokenVault
+        )!.withdraw(amount: amount)
+    }
+
+    execute {
+        let recipient = getAccount(to)
+        let receiverRef = recipient.capabilities.get<&{FungibleToken.Receiver}>(
+            /public/flowTokenReceiver
+        ).borrow() ?? panic("Unable to borrow receiver reference")
+
+        receiverRef.deposit(from: <-self.vault)
+    }
+}
+`
+
+	// Prepare transfer arguments (1.0 Flow = 100000000 in Flow's 8-decimal precision)
+	args := []cadence.Value{
+		cadence.UFix64(100000000), // 1.0 Flow
+		cadence.NewAddress(st.testAccount.Address),
+	}
+
+	// Create script
+	script := flowkit.Script{
+		Code: []byte(fundScript),
+		Args: args,
+	}
+
+	// Create account roles for transaction (use service account as payer)
+	acctRoles := transactions.AccountRoles{
+		Proposer:    *st.account,
+		Authorizers: []accounts.Account{*st.account},
+		Payer:       *st.account,
+	}
+
+	// Send funding transaction
+	_, result, err := st.flowkit.SendTransaction(
+		st.ctx,
+		acctRoles,
+		script,
+		9999, // gas limit
+	)
+
+	if err != nil {
+		st.t.Logf("Fund transaction failed: %v", err)
+		return fmt.Errorf("failed to send fund transaction: %w", err)
+	}
+
+	// Check for transaction errors
+	if result.Error != nil {
+		st.t.Logf("Fund transaction had execution error: %v", result.Error)
+		return fmt.Errorf("fund transaction failed with execution error: %w", result.Error)
+	}
+
+	st.t.Logf("Successfully funded test account with 1.0 Flow tokens")
 	return nil
 }
 
