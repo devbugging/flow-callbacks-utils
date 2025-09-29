@@ -482,43 +482,61 @@ type ScheduleResult struct {
 	Index    int // Original index for tracking
 }
 
-// scheduleCallbacksConcurrently schedules multiple callbacks with burst pattern
-// Submits transactions with 100ms delays between submissions for more realistic burst testing
-func (st *StressTest) scheduleCallbacksConcurrently(requests []ScheduleRequest, _ int) []ScheduleResult {
+// scheduleCallbacksConcurrently schedules multiple callbacks truly concurrently
+// Uses goroutines with semaphore to limit concurrency to available keys
+func (st *StressTest) scheduleCallbacksConcurrently(requests []ScheduleRequest, maxConcurrency int) []ScheduleResult {
 	results := make([]ScheduleResult, len(requests))
 
-	// Create a goroutine that submits transactions sequentially with 100ms delays
-	// This ensures proper sequence number ordering while still simulating burst traffic
-	for i, req := range requests {
-		// Wait 100ms between each transaction submission
-		if i > 0 {
-			time.Sleep(100 * time.Millisecond)
-		}
-
-		st.t.Logf("Submitting burst transaction %d/%d", i+1, len(requests))
-
-		// Submit transaction immediately using next available key
-		callback, err := st.scheduleCallbackWithNextKey(
-			req.Data,
-			req.Priority,
-			req.FutureSeconds,
-			req.Effort,
-		)
-
-		results[i] = ScheduleResult{
-			Callback: callback,
-			Error:    err,
-			Index:    i,
-		}
-
-		// Log progress
-		if err != nil {
-			st.t.Logf("Burst transaction %d failed: %v", i+1, err)
-		} else {
-			st.t.Logf("Burst transaction %d submitted successfully (ID: %d)", i+1, callback.TxID)
-		}
+	// Use keyCount as max concurrency if maxConcurrency is higher or not specified
+	if maxConcurrency <= 0 || maxConcurrency > st.keyCount {
+		maxConcurrency = st.keyCount
 	}
 
+	st.t.Logf("Starting concurrent submission of %d transactions with max concurrency %d", len(requests), maxConcurrency)
+
+	// Create semaphore to limit concurrent goroutines to available keys
+	semaphore := make(chan struct{}, maxConcurrency)
+	var wg sync.WaitGroup
+
+	// Launch goroutines for each request
+	for i, req := range requests {
+		wg.Add(1)
+		go func(index int, request ScheduleRequest) {
+			defer wg.Done()
+
+			// Acquire semaphore slot
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			st.t.Logf("Submitting concurrent transaction %d/%d", index+1, len(requests))
+
+			// Submit transaction using next available key
+			callback, err := st.scheduleCallbackWithNextKey(
+				request.Data,
+				request.Priority,
+				request.FutureSeconds,
+				request.Effort,
+			)
+
+			results[index] = ScheduleResult{
+				Callback: callback,
+				Error:    err,
+				Index:    index,
+			}
+
+			// Log progress
+			if err != nil {
+				st.t.Logf("Concurrent transaction %d failed: %v", index+1, err)
+			} else {
+				st.t.Logf("Concurrent transaction %d submitted successfully (ID: %d)", index+1, callback.TxID)
+			}
+		}(i, req)
+	}
+
+	// Wait for all goroutines to complete
+	wg.Wait()
+
+	st.t.Logf("All %d concurrent transactions completed", len(requests))
 	return results
 }
 
@@ -621,9 +639,9 @@ func TestSlotSaturation(t *testing.T) {
 		})
 	}
 
-	// Schedule high priority callbacks concurrently (limit to 10 concurrent to avoid overwhelming)
+	// Schedule high priority callbacks concurrently (use all available keys)
 	startTime := time.Now()
-	highResults := st.scheduleCallbacksConcurrently(highRequests, 10)
+	highResults := st.scheduleCallbacksConcurrently(highRequests, 0)
 	highDuration := time.Since(startTime)
 
 	highSuccessCount := 0
@@ -657,7 +675,7 @@ func TestSlotSaturation(t *testing.T) {
 
 	// Schedule medium priority callbacks concurrently
 	startTime = time.Now()
-	mediumResults := st.scheduleCallbacksConcurrently(mediumRequests, 10)
+	mediumResults := st.scheduleCallbacksConcurrently(mediumRequests, 0)
 	mediumDuration := time.Since(startTime)
 
 	mediumSuccessCount := 0
@@ -726,8 +744,8 @@ func TestBurstScheduling(t *testing.T) {
 		})
 	}
 
-	// Schedule all transactions concurrently with controlled concurrency
-	maxConcurrency := 5 // Higher concurrency for burst testing
+	// Schedule all transactions concurrently with maximum available keys
+	maxConcurrency := 0 // Use all available keys for maximum burst testing
 	startTime := time.Now()
 	results := st.scheduleCallbacksConcurrently(burstRequests, maxConcurrency)
 	duration := time.Since(startTime)
@@ -781,9 +799,9 @@ func TestCollectionLimits(t *testing.T) {
 		})
 	}
 
-	// Schedule all transactions concurrently - use higher concurrency to stress test
+	// Schedule all transactions concurrently - use all available keys to stress test
 	startTime := time.Now()
-	results := st.scheduleCallbacksConcurrently(collectionRequests, 25)
+	results := st.scheduleCallbacksConcurrently(collectionRequests, 0)
 	duration := time.Since(startTime)
 
 	successCount := 0
@@ -854,7 +872,7 @@ func TestPriorityStarvation(t *testing.T) {
 
 	// Schedule high priority transactions concurrently
 	startTime := time.Now()
-	highResults := st.scheduleCallbacksConcurrently(highRequests, 15)
+	highResults := st.scheduleCallbacksConcurrently(highRequests, 0)
 	highDuration := time.Since(startTime)
 
 	highSuccessCount := 0
