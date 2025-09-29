@@ -168,17 +168,18 @@ func (st *StressTest) getCurrentSequenceNumber() (uint64, error) {
 	return st.serviceAccount.Keys[0].SequenceNumber, nil
 }
 
-func (st *StressTest) getNextSequenceNumber() uint64 {
-	return st.sequenceNumber.Add(1)
-}
 
 func (st *StressTest) scheduleCallbackWithSequence(data string, priority uint8, futureSeconds int, effort string) (ScheduledCallback, error) {
-	timestamp := float64(time.Now().Unix() + int64(futureSeconds))
-
 	// Lock for sequence number management in concurrent scenarios
 	st.mu.Lock()
 	sequence := st.sequenceNumber.Add(1) - 1
 	st.mu.Unlock()
+
+	return st.scheduleCallbackWithPreAllocatedSequence(data, priority, futureSeconds, effort, sequence)
+}
+
+func (st *StressTest) scheduleCallbackWithPreAllocatedSequence(data string, priority uint8, futureSeconds int, effort string, sequence uint64) (ScheduledCallback, error) {
+	timestamp := float64(time.Now().Unix() + int64(futureSeconds))
 
 	st.t.Logf("Scheduling callback with data '%s' at timestamp %.1f, sequence %d", data, timestamp, sequence)
 
@@ -227,18 +228,12 @@ func (st *StressTest) scheduleCallbackWithSequence(data string, priority uint8, 
 	)
 
 	if err != nil {
-		// Rollback sequence on failure
-		current := st.sequenceNumber.Load()
-		st.sequenceNumber.Store(current - 1)
 		st.t.Logf("Schedule transaction failed: %v", err)
 		return ScheduledCallback{}, fmt.Errorf("failed to schedule callback: %w", err)
 	}
 
 	// Check for transaction errors
 	if result.Error != nil {
-		// Rollback sequence on failure
-		current := st.sequenceNumber.Load()
-		st.sequenceNumber.Store(current - 1)
 		st.t.Logf("Schedule transaction had execution error: %v", result.Error)
 		return ScheduledCallback{}, fmt.Errorf("schedule transaction failed with execution error: %w", result.Error)
 	}
@@ -481,53 +476,41 @@ type ScheduleResult struct {
 	Index    int // Original index for tracking
 }
 
-// scheduleCallbacksConcurrently schedules multiple callbacks concurrently
-func (st *StressTest) scheduleCallbacksConcurrently(requests []ScheduleRequest, maxConcurrency int) []ScheduleResult {
-	resultChan := make(chan ScheduleResult, len(requests))
-
-	// Use a semaphore for concurrency control and a mutex for transaction ordering
-	semaphore := make(chan struct{}, maxConcurrency)
-	txMutex := &sync.Mutex{}
-
-	var wg sync.WaitGroup
-
-	// Launch goroutines for each request
-	for i, req := range requests {
-		wg.Add(1)
-		go func(index int, request ScheduleRequest) {
-			defer wg.Done()
-
-			// Acquire semaphore for concurrency control
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			// Serialize the actual transaction sending to avoid sequence number conflicts
-			txMutex.Lock()
-			callback, err := st.scheduleCallbackWithSequence(
-				request.Data,
-				request.Priority,
-				request.FutureSeconds,
-				request.Effort,
-			)
-			txMutex.Unlock()
-
-			// Send result
-			resultChan <- ScheduleResult{
-				Callback: callback,
-				Error:    err,
-				Index:    index,
-			}
-		}(i, req)
-	}
-
-	// Wait for all goroutines to complete
-	wg.Wait()
-	close(resultChan)
-
-	// Collect results
+// scheduleCallbacksConcurrently schedules multiple callbacks with burst pattern
+// Submits transactions with 100ms delays between submissions for more realistic burst testing
+func (st *StressTest) scheduleCallbacksConcurrently(requests []ScheduleRequest, _ int) []ScheduleResult {
 	results := make([]ScheduleResult, len(requests))
-	for result := range resultChan {
-		results[result.Index] = result
+
+	// Create a goroutine that submits transactions sequentially with 100ms delays
+	// This ensures proper sequence number ordering while still simulating burst traffic
+	for i, req := range requests {
+		// Wait 100ms between each transaction submission
+		if i > 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		st.t.Logf("Submitting burst transaction %d/%d", i+1, len(requests))
+
+		// Submit transaction immediately (no goroutine, no pre-allocation)
+		callback, err := st.scheduleCallbackWithSequence(
+			req.Data,
+			req.Priority,
+			req.FutureSeconds,
+			req.Effort,
+		)
+
+		results[i] = ScheduleResult{
+			Callback: callback,
+			Error:    err,
+			Index:    i,
+		}
+
+		// Log progress
+		if err != nil {
+			st.t.Logf("Burst transaction %d failed: %v", i+1, err)
+		} else {
+			st.t.Logf("Burst transaction %d submitted successfully (ID: %d)", i+1, callback.TxID)
+		}
 	}
 
 	return results
