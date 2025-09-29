@@ -33,7 +33,7 @@
 				"emulator": "f8d6e0586b0a20c7",
 				"localnet": "f8d6e0586b0a20c7",
 				"migrationnet": "8c5303eaa26202d6",
-				"testnet": "f8d6e0586b0a20c7"
+				"testnet": "8c5303eaa26202d6"
 			}
 		},
 		"FungibleToken": {
@@ -50,8 +50,7 @@
 			"aliases": {
 				"emulator": "f8d6e0586b0a20c7",
 				"localnet": "f8d6e0586b0a20c7",
-				"migrationnet": "373ce83aef691d2d",
-				"testnet": "f8d6e0586b0a20c7"
+				"migrationnet": "373ce83aef691d2d"
 			}
 		},
 		"ViewResolver": {
@@ -70,7 +69,7 @@
 		"mainnet": "access.mainnet.nodes.onflow.org:9000",
 		"migrationnet": "access-001.migrationtestnet1.nodes.onflow.org:9000",
 		"testing": "127.0.0.1:3569",
-		"testnet": "access.devnet.nodes.onflow.org:9000"
+		"testnet": "access-001.devnet53.nodes.onflow.org:9000"
 	},
 	"accounts": {
 		"emulator-account": {
@@ -91,6 +90,10 @@
 				"hashAlgorithm": "SHA2_256",
 				"privateKey": "8ae3d0461cfed6d6f49bfc25fa899351c39d1bd21fdba8c87595b6c49bb4cc43"
 			}
+		},
+		"test": {
+			"address": "ba811377159e2cb1",
+			"key": "2817325e02ef5f81f228683c55834e9922c4170539106cf2ce6b548115dcb41e"
 		}
 	},
 	"deployments": {
@@ -110,6 +113,11 @@
 			"migration": [
 				"TestFlowCallbackHandler",
 				"FlowTransactionScheduler"
+			]
+		},
+		"testnet": {
+			"test": [
+				"TestFlowCallbackHandler"
 			]
 		}
 	}

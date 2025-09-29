@@ -13,9 +13,9 @@ import (
 
 const (
 	serviceAccount     = "8c5303eaa26202d6"
-	testHandlerAccount = "373ce83aef691d2d"
-	serviceAccountName = "migration"
-	network            = "migrationnet"
+	testHandlerAccount = "ba811377159e2cb1"
+	serviceAccountName = "test"
+	network            = "testnet"
 	defaultFee         = "0.1"
 	defaultEffort      = "100"
 )
@@ -592,7 +592,7 @@ func TestSingleFailedCallback(t *testing.T) {
 }
 
 func TestMultipleCallbacks(t *testing.T) {
-	numCallbacks := 5 // Configurable - change this to test more callbacks
+	numCallbacks := 10 // Configurable - change this to test more callbacks
 	ct := NewCallbackTest(t, numCallbacks)
 
 	var scheduledCallbacks []ScheduledCallback

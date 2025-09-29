@@ -1,9 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
-	"os/exec"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -11,6 +12,13 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/onflow/cadence"
+	"github.com/onflow/flow-go-sdk"
+	"github.com/onflow/flowkit/v2"
+	"github.com/onflow/flowkit/v2/config"
+	"github.com/onflow/flowkit/v2/gateway"
+	"github.com/rs/zerolog"
 )
 
 type StressTest struct {
@@ -21,6 +29,13 @@ type StressTest struct {
 	mu                     sync.Mutex      // Protect concurrent access
 	sequenceNumber         *atomic.Uint64  // Track sequence numbers for transactions
 	currentSequence        uint64          // Current sequence number
+
+	// Flowkit components
+	flowkit               *flowkit.Flowkit
+	ctx                   context.Context
+	network               config.Network
+	serviceAccount        *flow.Account
+	scheduleScript        string
 }
 
 func NewStressTest(t *testing.T) *StressTest {
@@ -29,9 +44,16 @@ func NewStressTest(t *testing.T) *StressTest {
 		executedCallbackIDs: make([]uint64, 0),
 		scheduledCallbacks:  make([]ScheduledCallback, 0),
 		sequenceNumber:      &atomic.Uint64{},
+		ctx:                 context.Background(),
 	}
 
-	// Get the current block height and sequence number
+	// Initialize flowkit
+	err := st.initializeFlowkit()
+	if err != nil {
+		t.Fatalf("Failed to initialize flowkit: %v", err)
+	}
+
+	// Get the current block height
 	startHeight, err := st.getCurrentBlockHeight()
 	if err != nil {
 		t.Fatalf("Failed to get current block height: %v", err)
@@ -46,32 +68,77 @@ func NewStressTest(t *testing.T) *StressTest {
 	st.currentSequence = seq
 	st.sequenceNumber.Store(seq)
 
+	// Load the schedule script
+	err = st.loadScheduleScript()
+	if err != nil {
+		t.Fatalf("Failed to load schedule script: %v", err)
+	}
+
 	t.Logf("Starting stress test from block height %d with sequence number %d", startHeight, seq)
 
 	return st
 }
 
+func (st *StressTest) initializeFlowkit() error {
+	// Load flow.json configuration
+	readerWriter := config.ReaderWriter{}
+	state, err := config.Load([]string{"flow.json"}, &readerWriter)
+	if err != nil {
+		return fmt.Errorf("failed to load flow.json: %w", err)
+	}
+
+	// Get testnet network
+	network, err := state.Networks().ByName("testnet")
+	if err != nil {
+		return fmt.Errorf("failed to get testnet network: %w", err)
+	}
+	st.network = *network
+
+	// Initialize gateway
+	gw, err := gateway.NewGrpcGateway(network.Host)
+	if err != nil {
+		return fmt.Errorf("failed to create gateway: %w", err)
+	}
+
+	// Initialize logger - simplified for stress testing
+	logger := zerolog.Nop()
+
+	// Create flowkit instance
+	st.flowkit = flowkit.NewFlowkit(state, *network, gw, &logger)
+
+	// Get service account
+	account, err := state.Accounts().ByName("test")
+	if err != nil {
+		return fmt.Errorf("failed to get test account: %w", err)
+	}
+
+	// Get the Flow account details
+	flowAccount, err := st.flowkit.GetAccount(st.ctx, account.Address)
+	if err != nil {
+		return fmt.Errorf("failed to get Flow account: %w", err)
+	}
+	st.serviceAccount = flowAccount
+
+	return nil
+}
+
+func (st *StressTest) loadScheduleScript() error {
+	scriptBytes, err := os.ReadFile("schedule_with_storage.cdc")
+	if err != nil {
+		return fmt.Errorf("failed to read schedule script: %w", err)
+	}
+	st.scheduleScript = string(scriptBytes)
+	return nil
+}
+
 func (st *StressTest) getCurrentSequenceNumber() (uint64, error) {
-	cmd := exec.Command("flow", "accounts", "get", serviceAccount, "-n", network)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return 0, fmt.Errorf("failed to get account info: %v, output: %s", err, output)
+	// The service account was already fetched in initializeFlowkit
+	if len(st.serviceAccount.Keys) == 0 {
+		return 0, fmt.Errorf("no keys found for service account")
 	}
 
-	// Parse the sequence number from the output
-	// Look for pattern like "Key 0.*Sequence Number.*\d+"
-	re := regexp.MustCompile(`Key\s+0.*?\n.*?Sequence Number\s+(\d+)`)
-	matches := re.FindStringSubmatch(string(output))
-	if len(matches) < 2 {
-		return 0, fmt.Errorf("could not find sequence number in output: %s", output)
-	}
-
-	seq, err := strconv.ParseUint(matches[1], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse sequence number: %v", err)
-	}
-
-	return seq, nil
+	// Use the first key's sequence number
+	return st.serviceAccount.Keys[0].SequenceNumber, nil
 }
 
 func (st *StressTest) getNextSequenceNumber() uint64 {
@@ -84,42 +151,72 @@ func (st *StressTest) scheduleCallbackWithSequence(data string, priority uint8, 
 
 	st.t.Logf("Scheduling callback with data '%s' at timestamp %.1f, sequence %d", data, timestamp, sequence)
 
-	cmd := exec.Command("flow", "transactions", "send", "schedule_with_storage.cdc",
-		fmt.Sprintf("%.1f", timestamp),
-		defaultFee,
-		effort,
-		fmt.Sprintf("%d", priority),
-		fmt.Sprintf("\"%s\"", data),
-		"-n", network,
-		"--signer", serviceAccountName,
-		"--proposer-key-index", "0",
-		"--proposer-sequence-number", fmt.Sprintf("%d", sequence))
+	// Prepare transaction arguments
+	effortUint, _ := strconv.ParseUint(effort, 10, 64)
+	feeAmount, _ := strconv.ParseFloat("0.1", 64)
 
-	output, err := cmd.CombinedOutput()
-	outputStr := string(output)
+	arguments := []interface{}{
+		timestamp,         // UFix64
+		feeAmount,         // UFix64
+		effortUint,        // UInt64
+		priority,          // UInt8
+		data,             // String
+	}
+
+	// Get test account for signing
+	state, err := st.flowkit.State()
+	if err != nil {
+		return ScheduledCallback{}, fmt.Errorf("failed to get state: %w", err)
+	}
+
+	testAccount, err := state.Accounts().ByName("test")
+	if err != nil {
+		return ScheduledCallback{}, fmt.Errorf("failed to get test account: %w", err)
+	}
+
+	// Create script
+	script := flowkit.Script{
+		Code:      []byte(st.scheduleScript),
+		Args:      arguments,
+	}
+
+	// Create account roles for transaction
+	accounts := flowkit.Accounts{
+		Proposer:    testAccount,
+		Authorizers: []*flowkit.Account{testAccount},
+		Payer:       testAccount,
+	}
+
+	// Send transaction using flowkit
+	_, result, err := st.flowkit.SendTransaction(
+		st.ctx,
+		accounts,
+		script,
+		9999, // gas limit
+	)
 
 	if err != nil {
 		// Rollback sequence on failure
 		current := st.sequenceNumber.Load()
 		st.sequenceNumber.Store(current - 1)
-		st.t.Logf("Schedule transaction failed - full output:\n%s", outputStr)
-		return ScheduledCallback{}, fmt.Errorf("failed to schedule callback: %v", err)
+		st.t.Logf("Schedule transaction failed: %v", err)
+		return ScheduledCallback{}, fmt.Errorf("failed to schedule callback: %w", err)
 	}
 
 	// Check for transaction errors
-	if strings.Contains(outputStr, "❌ Transaction Error") {
+	if result.Error != nil {
 		// Rollback sequence on failure
 		current := st.sequenceNumber.Load()
 		st.sequenceNumber.Store(current - 1)
-		st.t.Logf("Schedule transaction had execution error - full output:\n%s", outputStr)
-		return ScheduledCallback{}, fmt.Errorf("schedule transaction failed with execution error")
+		st.t.Logf("Schedule transaction had execution error: %v", result.Error)
+		return ScheduledCallback{}, fmt.Errorf("schedule transaction failed with execution error: %w", result.Error)
 	}
 
-	// Extract transaction ID
-	txID := st.extractTransactionID(outputStr)
+	// Extract transaction ID from events
+	txID := st.extractTransactionIDFromEvents(result.Events)
 	if txID == 0 {
-		st.t.Logf("Failed to extract transaction ID - full output:\n%s", outputStr)
-		return ScheduledCallback{}, fmt.Errorf("failed to extract transaction ID from output")
+		st.t.Logf("Failed to extract transaction ID from events: %+v", result.Events)
+		return ScheduledCallback{}, fmt.Errorf("failed to extract transaction ID from events")
 	}
 
 	callback := ScheduledCallback{
@@ -132,6 +229,8 @@ func (st *StressTest) scheduleCallbackWithSequence(data string, priority uint8, 
 	st.mu.Lock()
 	st.scheduledCallbacks = append(st.scheduledCallbacks, callback)
 	st.mu.Unlock()
+
+	st.t.Logf("Successfully scheduled callback with ID %d", txID)
 
 	return callback, nil
 }
@@ -153,25 +252,36 @@ func (st *StressTest) extractTransactionID(output string) uint64 {
 	return txID
 }
 
+func (st *StressTest) extractTransactionIDFromEvents(events []flow.Event) uint64 {
+	for _, event := range events {
+		// Look for FlowTransactionScheduler.Scheduled event
+		if strings.Contains(string(event.Type), "FlowTransactionScheduler.Scheduled") {
+			// Extract the id field from the event payload
+			eventValue := event.Value
+			if eventStruct, ok := eventValue.(cadence.Event); ok {
+				for _, field := range eventStruct.EventType.Fields {
+					if field.Identifier == "id" {
+						// Get the actual field value by index
+						if len(eventStruct.Fields) > 0 {
+							if idValue, ok := eventStruct.Fields[0].(cadence.UInt64); ok {
+								return uint64(idValue)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return 0
+}
+
 func (st *StressTest) getCurrentBlockHeight() (uint64, error) {
-	cmd := exec.Command("flow", "blocks", "get", "latest", "-n", network)
-	output, err := cmd.CombinedOutput()
+	latestBlock, err := st.flowkit.GetBlock(st.ctx, flowkit.LatestBlockQuery)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get latest block: %v, output: %s", err, output)
+		return 0, fmt.Errorf("failed to get latest block: %w", err)
 	}
 
-	re := regexp.MustCompile(`Height\s+(\d+)`)
-	matches := re.FindStringSubmatch(string(output))
-	if len(matches) < 2 {
-		return 0, fmt.Errorf("could not find block height in output: %s", output)
-	}
-
-	height, err := strconv.ParseUint(matches[1], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse block height: %v", err)
-	}
-
-	return height, nil
+	return latestBlock.Height, nil
 }
 
 func (st *StressTest) waitAndCollectExecutedCallbacks(maxWaitTime time.Duration) error {
@@ -189,14 +299,14 @@ func (st *StressTest) waitAndCollectExecutedCallbacks(maxWaitTime time.Duration)
 		case <-timeout:
 			return fmt.Errorf("timeout waiting for events after 120 seconds")
 		case <-ticker.C:
-			eventOutput, err := st.fetchEvents()
+			events, err := st.fetchEvents()
 			if err != nil {
 				st.t.Logf("Error fetching events: %v", err)
 				continue
 			}
 
 			// Parse executed callbacks and their IDs
-			executedIDs := st.parseExecutedCallbackIDs(eventOutput)
+			executedIDs := st.parseExecutedCallbackIDsFromEvents(events)
 
 			st.mu.Lock()
 			st.executedCallbackIDs = executedIDs
@@ -246,55 +356,95 @@ func (st *StressTest) parseExecutedCallbackIDs(eventOutput string) []uint64 {
 	return executedIDs
 }
 
-func (st *StressTest) fetchEvents() (string, error) {
+func (st *StressTest) parseExecutedCallbackIDsFromEvents(events []flow.Event) []uint64 {
+	var executedIDs []uint64
+
+	for _, event := range events {
+		// Look for FlowTransactionScheduler.Executed events
+		if strings.Contains(string(event.Type), "FlowTransactionScheduler.Executed") {
+			// Extract the id field from the event payload
+			eventValue := event.Value
+			if eventStruct, ok := eventValue.(cadence.Event); ok {
+				for _, field := range eventStruct.EventType.Fields {
+					if field.Identifier == "id" {
+						// Get the actual field value by index
+						if len(eventStruct.Fields) > 0 {
+							if idValue, ok := eventStruct.Fields[0].(cadence.UInt64); ok {
+								executedIDs = append(executedIDs, uint64(idValue))
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return executedIDs
+}
+
+func (st *StressTest) fetchEvents() ([]flow.Event, error) {
 	currentHeight, err := st.getCurrentBlockHeight()
 	if err != nil {
-		return "", fmt.Errorf("failed to get current block height: %v", err)
+		return nil, fmt.Errorf("failed to get current block height: %w", err)
 	}
 
-	maxBlocks := uint64(100)
-	var allEvents []string
-	scanStart := st.startBlockHeight
+	st.t.Logf("Scanning for events from block %d to %d", st.startBlockHeight, currentHeight)
 
-	st.t.Logf("Scanning for events from block %d to %d", scanStart, currentHeight)
-
-	for scanStart <= currentHeight {
-		scanEnd := scanStart + maxBlocks - 1
-		if scanEnd > currentHeight {
-			scanEnd = currentHeight
-		}
-
-		if scanStart > scanEnd {
-			break
-		}
-
-		account := strings.TrimPrefix(serviceAccount, "0x")
-		cmd := exec.Command("flow", "events", "get",
-			fmt.Sprintf("A.%s.FlowTransactionScheduler.Scheduled", account),
-			fmt.Sprintf("A.%s.FlowTransactionScheduler.PendingExecution", account),
-			fmt.Sprintf("A.%s.FlowTransactionScheduler.Executed", account),
-			fmt.Sprintf("A.%s.FlowTransactionScheduler.Canceled", account),
-			fmt.Sprintf("A.%s.TestFlowCallbackHandler.CallbackExecuted", testHandlerAccount),
-			"--start", fmt.Sprintf("%d", scanStart),
-			"--end", fmt.Sprintf("%d", scanEnd),
-			"-n", network)
-
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			st.t.Logf("Error fetching events for blocks %d-%d: %v", scanStart, scanEnd, err)
-			scanStart = scanEnd + 1
-			continue
-		}
-
-		outputStr := string(output)
-		if strings.Contains(outputStr, "Events Block #") {
-			allEvents = append(allEvents, outputStr)
-		}
-
-		scanStart = scanEnd + 1
+	// Get contract addresses from flow.json
+	state, err := st.flowkit.State()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get state: %w", err)
 	}
 
-	return strings.Join(allEvents, "\n"), nil
+	schedulerContract, err := state.Contracts().ByName("FlowTransactionScheduler")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get FlowTransactionScheduler contract: %w", err)
+	}
+
+	handlerContract, err := state.Contracts().ByName("TestFlowCallbackHandler")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get TestFlowCallbackHandler contract: %w", err)
+	}
+
+	// Get contract addresses for the testnet
+	schedulerAddr := schedulerContract.Aliases.ByNetwork("testnet").Address
+	handlerAddr := handlerContract.Aliases.ByNetwork("testnet").Address
+
+	// Define event types to query
+	eventTypes := []string{
+		fmt.Sprintf("A.%s.FlowTransactionScheduler.Scheduled", schedulerAddr.Hex()),
+		fmt.Sprintf("A.%s.FlowTransactionScheduler.PendingExecution", schedulerAddr.Hex()),
+		fmt.Sprintf("A.%s.FlowTransactionScheduler.Executed", schedulerAddr.Hex()),
+		fmt.Sprintf("A.%s.FlowTransactionScheduler.Canceled", schedulerAddr.Hex()),
+		fmt.Sprintf("A.%s.TestFlowCallbackHandler.CallbackExecuted", handlerAddr.Hex()),
+	}
+
+	// Create event worker
+	worker := &flowkit.EventWorker{
+		Count:           1,
+		BlocksPerWorker: 100,
+	}
+
+	// Query events using flowkit
+	events, err := st.flowkit.GetEvents(
+		st.ctx,
+		eventTypes,
+		st.startBlockHeight,
+		currentHeight,
+		worker,
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get events: %w", err)
+	}
+
+	// Flatten all events into a single slice
+	var allEvents []flow.Event
+	for _, blockEvents := range events {
+		allEvents = append(allEvents, blockEvents.Events...)
+	}
+
+	return allEvents, nil
 }
 
 func (st *StressTest) getExecutedCallbackIDs() []uint64 {
@@ -478,8 +628,15 @@ func TestCollectionLimits(t *testing.T) {
 	st.waitAndCollectExecutedCallbacks(time.Duration(futureSeconds+30) * time.Second)
 
 	// Check events for collection limit
-	eventOutput, _ := st.fetchEvents()
-	if strings.Contains(eventOutput, "CollectionLimitReached") {
+	events, _ := st.fetchEvents()
+	hasCollectionLimitEvent := false
+	for _, event := range events {
+		if strings.Contains(string(event.Type), "CollectionLimitReached") {
+			hasCollectionLimitEvent = true
+			break
+		}
+	}
+	if hasCollectionLimitEvent {
 		t.Logf("Found CollectionLimitReached event as expected")
 	}
 
