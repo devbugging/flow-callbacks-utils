@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"fmt"
 	cryptorand "crypto/rand"
+	"fmt"
 	mathrand "math/rand"
 	"os"
 	"regexp"
@@ -182,11 +182,8 @@ func (st *StressTest) createTestAccountMultipleKeys() error {
 func (st *StressTest) fundTestAccount() error {
 	st.t.Logf("Funding test account %s with 1.0 Flow tokens", st.testAccount.Address.Hex())
 
-	// Use the loaded fund script
-
-	// Prepare transfer arguments (1.0 Flow = 100000000 in Flow's 8-decimal precision)
 	args := []cadence.Value{
-		cadence.UFix64(100000000), // 1.0 Flow
+		cadence.UFix64(200000000), // 2.0 Flow
 		cadence.NewAddress(st.testAccount.Address),
 	}
 
@@ -387,10 +384,24 @@ func (st *StressTest) getCurrentBlockHeight() (uint64, error) {
 	return latestBlock.Height, nil
 }
 
-func (st *StressTest) waitAndCollectExecutedCallbacks(maxWaitTime time.Duration) error {
-	st.t.Logf("Waiting up to %v for callbacks to execute...", maxWaitTime)
+func (st *StressTest) waitAndCollectExecutedCallbacks(bufferSeconds int) error {
+	// Find the latest scheduled timestamp
+	latestTimestamp := st.getLatestScheduledTimestamp()
+	if latestTimestamp == 0 {
+		return fmt.Errorf("no scheduled callbacks found")
+	}
 
-	time.Sleep(maxWaitTime)
+	// Calculate wait time: latest timestamp + buffer - current time
+	now := float64(time.Now().Unix())
+	waitUntil := latestTimestamp + float64(bufferSeconds)
+
+	if waitUntil <= now {
+		st.t.Logf("All callbacks should have executed by now (latest: %.0f, now: %.0f)", latestTimestamp, now)
+	} else {
+		sleepDuration := time.Duration(waitUntil-now) * time.Second
+		st.t.Logf("Waiting %.0fs until latest scheduled callback (%.0f) + %ds buffer", sleepDuration.Seconds(), latestTimestamp, bufferSeconds)
+		time.Sleep(sleepDuration)
+	}
 
 	// Poll for events
 	timeout := time.After(120 * time.Second)
@@ -545,6 +556,23 @@ func (st *StressTest) getScheduledCallbacks() []ScheduledCallback {
 	return result
 }
 
+func (st *StressTest) getLatestScheduledTimestamp() float64 {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+
+	if len(st.scheduledCallbacks) == 0 {
+		return 0
+	}
+
+	latest := st.scheduledCallbacks[0].Timestamp
+	for _, callback := range st.scheduledCallbacks {
+		if callback.Timestamp > latest {
+			latest = callback.Timestamp
+		}
+	}
+	return latest
+}
+
 // ScheduleResult represents the result of a concurrent scheduling operation
 type ScheduleResult struct {
 	Callback ScheduledCallback
@@ -641,7 +669,7 @@ func TestSingleTransactionSanity(t *testing.T) {
 
 	// Wait for execution
 	t.Logf("Waiting for callback execution...")
-	err = st.waitAndCollectExecutedCallbacks(time.Duration(futureSeconds+15) * time.Second)
+	err = st.waitAndCollectExecutedCallbacks(10) // 10 second buffer
 	if err != nil {
 		t.Errorf("Failed to collect executed callbacks: %v", err)
 	}
@@ -770,7 +798,7 @@ func TestSlotSaturation(t *testing.T) {
 	}
 
 	// Wait for execution and collect results
-	st.waitAndCollectExecutedCallbacks(time.Duration(futureSeconds+30) * time.Second)
+	st.waitAndCollectExecutedCallbacks(10) // 10 second buffer
 
 	executedIDs := st.getExecutedCallbackIDs()
 	scheduledCallbacks := st.getScheduledCallbacks()
@@ -838,7 +866,7 @@ func TestBurstScheduling(t *testing.T) {
 	t.Logf("- Throughput: %.2f tx/sec", float64(successCount)/duration.Seconds())
 
 	// Wait for execution
-	st.waitAndCollectExecutedCallbacks(time.Duration(futureSeconds+90) * time.Second)
+	st.waitAndCollectExecutedCallbacks(10) // 10 second buffer
 
 	executedIDs := st.getExecutedCallbackIDs()
 	t.Logf("Burst Test Results:")
@@ -892,7 +920,7 @@ func TestCollectionLimits(t *testing.T) {
 	t.Logf("Successfully scheduled %d transactions (failures: %d)", successCount, failureCount)
 
 	// Wait and check for CollectionLimitReached event
-	st.waitAndCollectExecutedCallbacks(time.Duration(futureSeconds+30) * time.Second)
+	st.waitAndCollectExecutedCallbacks(10) // 10 second buffer
 
 	// Check events for collection limit
 	events, _ := st.fetchEvents()
@@ -985,7 +1013,7 @@ func TestPriorityStarvation(t *testing.T) {
 	}
 
 	// Wait for execution
-	st.waitAndCollectExecutedCallbacks(time.Duration(futureSeconds+60) * time.Second)
+	st.waitAndCollectExecutedCallbacks(10) // 10 second buffer
 
 	executedIDs := st.getExecutedCallbackIDs()
 	scheduledCallbacks := st.getScheduledCallbacks()
@@ -1097,7 +1125,7 @@ func TestDataPayloadStress(t *testing.T) {
 	t.Logf("\nTesting storage fee impact on different data sizes...")
 
 	// Wait for execution of successful payloads
-	st.waitAndCollectExecutedCallbacks(time.Duration(futureSeconds+30) * time.Second)
+	st.waitAndCollectExecutedCallbacks(10) // 10 second buffer
 
 	executedIDs := st.getExecutedCallbackIDs()
 	scheduledCallbacks := st.getScheduledCallbacks()
