@@ -257,15 +257,12 @@ func (st *StressTest) extractTransactionIDFromEvents(events []flow.Event) uint64
 		// Look for FlowTransactionScheduler.Scheduled event
 		if strings.Contains(string(event.Type), "FlowTransactionScheduler.Scheduled") {
 			// Extract the id field from the event payload
-			eventValue := event.Value
-			if eventStruct, ok := eventValue.(cadence.Event); ok {
-				for _, field := range eventStruct.EventType.Fields {
-					if field.Identifier == "id" {
-						// Get the actual field value by index
-						if len(eventStruct.Fields) > 0 {
-							if idValue, ok := eventStruct.Fields[0].(cadence.UInt64); ok {
-								return uint64(idValue)
-							}
+			if eventStruct, ok := event.Value.(cadence.Event); ok {
+				// Look for the "id" field in the event
+				for i, field := range eventStruct.EventType.Fields {
+					if field.Identifier == "id" && i < len(eventStruct.Fields) {
+						if idValue, ok := eventStruct.Fields[i].(cadence.UInt64); ok {
+							return uint64(idValue)
 						}
 					}
 				}
@@ -363,15 +360,12 @@ func (st *StressTest) parseExecutedCallbackIDsFromEvents(events []flow.Event) []
 		// Look for FlowTransactionScheduler.Executed events
 		if strings.Contains(string(event.Type), "FlowTransactionScheduler.Executed") {
 			// Extract the id field from the event payload
-			eventValue := event.Value
-			if eventStruct, ok := eventValue.(cadence.Event); ok {
-				for _, field := range eventStruct.EventType.Fields {
-					if field.Identifier == "id" {
-						// Get the actual field value by index
-						if len(eventStruct.Fields) > 0 {
-							if idValue, ok := eventStruct.Fields[0].(cadence.UInt64); ok {
-								executedIDs = append(executedIDs, uint64(idValue))
-							}
+			if eventStruct, ok := event.Value.(cadence.Event); ok {
+				// Look for the "id" field in the event
+				for i, field := range eventStruct.EventType.Fields {
+					if field.Identifier == "id" && i < len(eventStruct.Fields) {
+						if idValue, ok := eventStruct.Fields[i].(cadence.UInt64); ok {
+							executedIDs = append(executedIDs, uint64(idValue))
 						}
 					}
 				}
@@ -467,6 +461,68 @@ func (st *StressTest) getScheduledCallbacks() []ScheduledCallback {
 	return result
 }
 
+// ScheduleResult represents the result of a concurrent scheduling operation
+type ScheduleResult struct {
+	Callback ScheduledCallback
+	Error    error
+	Index    int // Original index for tracking
+}
+
+// scheduleCallbacksConcurrently schedules multiple callbacks concurrently
+func (st *StressTest) scheduleCallbacksConcurrently(requests []ScheduleRequest, maxConcurrency int) []ScheduleResult {
+	resultChan := make(chan ScheduleResult, len(requests))
+	semaphore := make(chan struct{}, maxConcurrency)
+
+	var wg sync.WaitGroup
+
+	// Launch goroutines for each request
+	for i, req := range requests {
+		wg.Add(1)
+		go func(index int, request ScheduleRequest) {
+			defer wg.Done()
+
+			// Acquire semaphore
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			// Schedule the callback
+			callback, err := st.scheduleCallbackWithSequence(
+				request.Data,
+				request.Priority,
+				request.FutureSeconds,
+				request.Effort,
+			)
+
+			// Send result
+			resultChan <- ScheduleResult{
+				Callback: callback,
+				Error:    err,
+				Index:    index,
+			}
+		}(i, req)
+	}
+
+	// Wait for all goroutines to complete
+	wg.Wait()
+	close(resultChan)
+
+	// Collect results
+	results := make([]ScheduleResult, len(requests))
+	for result := range resultChan {
+		results[result.Index] = result
+	}
+
+	return results
+}
+
+// ScheduleRequest represents a request to schedule a callback
+type ScheduleRequest struct {
+	Data          string
+	Priority      uint8
+	FutureSeconds int
+	Effort        string
+}
+
 // Test Suite 1: Slot Saturation Test
 func TestSlotSaturation(t *testing.T) {
 	st := NewStressTest(t)
@@ -477,32 +533,69 @@ func TestSlotSaturation(t *testing.T) {
 	highPriorityCount := 20
 	highPriorityEffort := "1000"
 
-	t.Logf("Scheduling %d high priority transactions with %s effort each", highPriorityCount, highPriorityEffort)
+	t.Logf("Scheduling %d high priority transactions with %s effort each concurrently", highPriorityCount, highPriorityEffort)
 
+	// Create high priority requests
+	var highRequests []ScheduleRequest
 	for i := 0; i < highPriorityCount; i++ {
 		data := fmt.Sprintf("slot-saturation-high-%d-%d", i, time.Now().UnixNano())
-		_, err := st.scheduleCallbackWithSequence(data, 0, futureSeconds, highPriorityEffort)
-		if err != nil {
-			t.Logf("Failed to schedule high priority callback %d: %v", i, err)
-			// Continue to see how many we can schedule
-		}
-		time.Sleep(100 * time.Millisecond) // Small delay between transactions
+		highRequests = append(highRequests, ScheduleRequest{
+			Data:          data,
+			Priority:      0,
+			FutureSeconds: futureSeconds,
+			Effort:        highPriorityEffort,
+		})
 	}
+
+	// Schedule high priority callbacks concurrently (limit to 10 concurrent to avoid overwhelming)
+	startTime := time.Now()
+	highResults := st.scheduleCallbacksConcurrently(highRequests, 10)
+	highDuration := time.Since(startTime)
+
+	highSuccessCount := 0
+	for _, result := range highResults {
+		if result.Error != nil {
+			t.Logf("Failed to schedule high priority callback: %v", result.Error)
+		} else {
+			highSuccessCount++
+		}
+	}
+
+	t.Logf("High priority scheduling completed: %d successful in %v", highSuccessCount, highDuration)
 
 	// Medium priority: Try to fill shared pool (10 transactions @ 1000 each)
 	mediumPriorityCount := 10
 	mediumPriorityEffort := "1000"
 
-	t.Logf("Scheduling %d medium priority transactions with %s effort each", mediumPriorityCount, mediumPriorityEffort)
+	t.Logf("Scheduling %d medium priority transactions with %s effort each concurrently", mediumPriorityCount, mediumPriorityEffort)
 
+	// Create medium priority requests
+	var mediumRequests []ScheduleRequest
 	for i := 0; i < mediumPriorityCount; i++ {
 		data := fmt.Sprintf("slot-saturation-medium-%d-%d", i, time.Now().UnixNano())
-		_, err := st.scheduleCallbackWithSequence(data, 1, futureSeconds, mediumPriorityEffort)
-		if err != nil {
-			t.Logf("Failed to schedule medium priority callback %d: %v", i, err)
-		}
-		time.Sleep(100 * time.Millisecond)
+		mediumRequests = append(mediumRequests, ScheduleRequest{
+			Data:          data,
+			Priority:      1,
+			FutureSeconds: futureSeconds,
+			Effort:        mediumPriorityEffort,
+		})
 	}
+
+	// Schedule medium priority callbacks concurrently
+	startTime = time.Now()
+	mediumResults := st.scheduleCallbacksConcurrently(mediumRequests, 10)
+	mediumDuration := time.Since(startTime)
+
+	mediumSuccessCount := 0
+	for _, result := range mediumResults {
+		if result.Error != nil {
+			t.Logf("Failed to schedule medium priority callback: %v", result.Error)
+		} else {
+			mediumSuccessCount++
+		}
+	}
+
+	t.Logf("Medium priority scheduling completed: %d successful in %v", mediumSuccessCount, mediumDuration)
 
 	// Try to schedule one more high priority - should fail
 	t.Logf("Attempting to schedule additional high priority transaction (should fail)")
@@ -521,9 +614,12 @@ func TestSlotSaturation(t *testing.T) {
 	scheduledCallbacks := st.getScheduledCallbacks()
 
 	t.Logf("Slot Saturation Test Results:")
-	t.Logf("- Scheduled: %d callbacks", len(scheduledCallbacks))
+	t.Logf("- High Priority Scheduled: %d", highSuccessCount)
+	t.Logf("- Medium Priority Scheduled: %d", mediumSuccessCount)
+	t.Logf("- Total Scheduled: %d callbacks", len(scheduledCallbacks))
 	t.Logf("- Executed: %d callbacks", len(executedIDs))
-	t.Logf("- Executed IDs: %v", executedIDs)
+	t.Logf("- High Priority Scheduling Time: %v", highDuration)
+	t.Logf("- Medium Priority Scheduling Time: %v", mediumDuration)
 }
 
 // Test Suite 2: Burst Scheduling Test
@@ -538,47 +634,41 @@ func TestBurstScheduling(t *testing.T) {
 
 	futureSeconds := 120 // Schedule 2 minutes in future to give time for all transactions
 
-	t.Logf("Starting burst scheduling of %d transactions", burstSize)
+	t.Logf("Starting burst scheduling of %d transactions concurrently", burstSize)
 
-	startTime := time.Now()
-	successCount := 0
-	failureCount := 0
-
-	// Use goroutines for parallel scheduling with sequence number management
-	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, 10) // Limit concurrent submissions to 10
-
+	// Create burst requests with mixed priorities and random parameters
+	var burstRequests []ScheduleRequest
 	for i := 0; i < burstSize; i++ {
-		wg.Add(1)
-		go func(index int) {
-			defer wg.Done()
+		priority := uint8(i % 3) // Mix priorities (0, 1, 2)
+		effort := fmt.Sprintf("%d", 100+rand.Intn(900)) // Random effort 100-999
+		data := fmt.Sprintf("burst-%d-%d", i, time.Now().UnixNano())
+		timeVariation := rand.Intn(60) // Spread execution times over 60 seconds
 
-			semaphore <- struct{}{} // Acquire
-			defer func() { <-semaphore }() // Release
-
-			priority := uint8(index % 3) // Mix priorities
-			effort := fmt.Sprintf("%d", 100+rand.Intn(900)) // Random effort 100-999
-			data := fmt.Sprintf("burst-%d-%d", index, time.Now().UnixNano())
-
-			_, err := st.scheduleCallbackWithSequence(data, priority, futureSeconds+rand.Intn(60), effort)
-			if err != nil {
-				st.t.Logf("Failed to schedule burst callback %d: %v", index, err)
-				st.mu.Lock()
-				failureCount++
-				st.mu.Unlock()
-			} else {
-				st.mu.Lock()
-				successCount++
-				st.mu.Unlock()
-			}
-		}(i)
-
-		// Small delay to prevent overwhelming the network
-		time.Sleep(50 * time.Millisecond)
+		burstRequests = append(burstRequests, ScheduleRequest{
+			Data:          data,
+			Priority:      priority,
+			FutureSeconds: futureSeconds + timeVariation,
+			Effort:        effort,
+		})
 	}
 
-	wg.Wait()
+	// Schedule all transactions concurrently with controlled concurrency
+	maxConcurrency := 20 // Higher concurrency for burst testing
+	startTime := time.Now()
+	results := st.scheduleCallbacksConcurrently(burstRequests, maxConcurrency)
 	duration := time.Since(startTime)
+
+	// Analyze results
+	successCount := 0
+	failureCount := 0
+	for _, result := range results {
+		if result.Error != nil {
+			t.Logf("Failed to schedule burst callback: %v", result.Error)
+			failureCount++
+		} else {
+			successCount++
+		}
+	}
 
 	t.Logf("Burst scheduling completed in %v", duration)
 	t.Logf("- Success: %d", successCount)
@@ -602,27 +692,42 @@ func TestCollectionLimits(t *testing.T) {
 	targetCount := 155 // Try to exceed the 150 limit
 	futureSeconds := 90
 
-	t.Logf("Scheduling %d transactions for the same timestamp to test collection limit", targetCount)
+	t.Logf("Scheduling %d transactions for the same timestamp to test collection limit concurrently", targetCount)
 
-	successCount := 0
+	// Create requests for all transactions with the same timestamp
+	var collectionRequests []ScheduleRequest
 	for i := 0; i < targetCount; i++ {
 		data := fmt.Sprintf("collection-limit-%d-%d", i, time.Now().UnixNano())
-		effort := "100" // Small effort to ensure we hit transaction count limit first
 
-		_, err := st.scheduleCallbackWithSequence(data, uint8(i%3), futureSeconds, effort)
-		if err != nil {
-			t.Logf("Failed to schedule callback %d (expected after 150): %v", i, err)
+		collectionRequests = append(collectionRequests, ScheduleRequest{
+			Data:          data,
+			Priority:      uint8(i % 3), // Mix priorities
+			FutureSeconds: futureSeconds, // Same timestamp for all
+			Effort:        "100", // Small effort to ensure we hit transaction count limit first
+		})
+	}
+
+	// Schedule all transactions concurrently - use higher concurrency to stress test
+	startTime := time.Now()
+	results := st.scheduleCallbacksConcurrently(collectionRequests, 25)
+	duration := time.Since(startTime)
+
+	successCount := 0
+	failureCount := 0
+	for i, result := range results {
+		if result.Error != nil {
+			t.Logf("Failed to schedule callback %d: %v", i, result.Error)
 			if i >= 150 {
-				t.Logf("Correctly hit collection limit at transaction %d", i)
+				t.Logf("Expected failure after 150: transaction %d correctly rejected", i)
 			}
+			failureCount++
 		} else {
 			successCount++
 		}
-
-		time.Sleep(100 * time.Millisecond)
 	}
 
-	t.Logf("Successfully scheduled %d transactions", successCount)
+	t.Logf("Collection limit scheduling completed in %v", duration)
+	t.Logf("Successfully scheduled %d transactions (failures: %d)", successCount, failureCount)
 
 	// Wait and check for CollectionLimitReached event
 	st.waitAndCollectExecutedCallbacks(time.Duration(futureSeconds+30) * time.Second)
@@ -658,19 +763,36 @@ func TestPriorityStarvation(t *testing.T) {
 
 	futureSeconds := 60
 
-	// First, fill slot with high priority transactions
-	t.Logf("Filling slot with high priority transactions")
+	// First, fill slot with high priority transactions concurrently
+	t.Logf("Filling slot with high priority transactions concurrently")
 
-	// Fill high priority to near capacity (29 transactions @ 1000 effort = 29,000 out of 30,000)
+	// Create high priority requests to near capacity (29 transactions @ 1000 effort = 29,000 out of 30,000)
+	var highRequests []ScheduleRequest
 	for i := 0; i < 29; i++ {
 		data := fmt.Sprintf("starvation-high-%d-%d", i, time.Now().UnixNano())
-		_, err := st.scheduleCallbackWithSequence(data, 0, futureSeconds, "1000")
-		if err != nil {
-			t.Logf("Failed to schedule high priority %d: %v", i, err)
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
+		highRequests = append(highRequests, ScheduleRequest{
+			Data:          data,
+			Priority:      0,
+			FutureSeconds: futureSeconds,
+			Effort:        "1000",
+		})
 	}
+
+	// Schedule high priority transactions concurrently
+	startTime := time.Now()
+	highResults := st.scheduleCallbacksConcurrently(highRequests, 15)
+	highDuration := time.Since(startTime)
+
+	highSuccessCount := 0
+	for _, result := range highResults {
+		if result.Error != nil {
+			t.Logf("Failed to schedule high priority: %v", result.Error)
+		} else {
+			highSuccessCount++
+		}
+	}
+
+	t.Logf("High priority scheduling completed: %d successful in %v", highSuccessCount, highDuration)
 
 	// Now try to schedule medium priority - should get rescheduled to next slot
 	t.Logf("Attempting to schedule medium priority transactions (should get different slot)")
@@ -756,8 +878,10 @@ func TestDataPayloadStress(t *testing.T) {
 		{"TooLarge-4MB", 4096, false}, // Should fail - exceeds 3MB limit
 	}
 
+	// Create payload requests
+	var payloadRequests []ScheduleRequest
 	for _, test := range dataSizes {
-		t.Logf("Testing data payload: %s (%d KB)", test.name, test.size)
+		t.Logf("Preparing data payload: %s (%d KB)", test.name, test.size)
 
 		// Generate data of specified size
 		var data string
@@ -776,20 +900,36 @@ func TestDataPayloadStress(t *testing.T) {
 			data = dataBuilder.String()
 		}
 
-		_, err := st.scheduleCallbackWithSequence(data, 1, futureSeconds+test.size/10, "100")
+		payloadRequests = append(payloadRequests, ScheduleRequest{
+			Data:          data,
+			Priority:      1,
+			FutureSeconds: futureSeconds + test.size/10, // Spread execution times
+			Effort:        "100",
+		})
+	}
 
-		if test.shouldSucceed && err != nil {
-			t.Errorf("Failed to schedule %s payload: %v", test.name, err)
-		} else if !test.shouldSucceed && err == nil {
+	// Schedule all payload tests concurrently
+	t.Logf("Scheduling all payload tests concurrently")
+	startTime := time.Now()
+	results := st.scheduleCallbacksConcurrently(payloadRequests, 6) // Limited concurrency for large payloads
+	duration := time.Since(startTime)
+
+	// Analyze results
+	for i, result := range results {
+		test := dataSizes[i]
+
+		if test.shouldSucceed && result.Error != nil {
+			t.Errorf("Failed to schedule %s payload: %v", test.name, result.Error)
+		} else if !test.shouldSucceed && result.Error == nil {
 			t.Errorf("Expected %s payload to fail but it succeeded", test.name)
-		} else if !test.shouldSucceed && err != nil {
-			t.Logf("Correctly rejected %s payload: %v", test.name, err)
+		} else if !test.shouldSucceed && result.Error != nil {
+			t.Logf("Correctly rejected %s payload: %v", test.name, result.Error)
 		} else {
 			t.Logf("Successfully scheduled %s payload", test.name)
 		}
-
-		time.Sleep(200 * time.Millisecond) // Small delay between tests
 	}
+
+	t.Logf("Data payload scheduling completed in %v", duration)
 
 	// Test fee calculation for different data sizes
 	t.Logf("\nTesting storage fee impact on different data sizes...")
