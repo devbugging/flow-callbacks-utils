@@ -417,6 +417,9 @@
             <label>
                 <input type="checkbox" id="autoRefresh" checked> Auto-refresh (10s)
             </label>
+            <div id="paginationInfo" style="color: #666; font-size: 14px; margin-left: 15px;">
+                Showing 0 of 0 events
+            </div>
         </div>
         
         <div class="loading" id="loading">Loading events...</div>
@@ -441,6 +444,15 @@
             <tbody id="eventsBody">
             </tbody>
         </table>
+
+        <div id="loadMoreIndicator" style="display: none; text-align: center; padding: 20px; color: #666;">
+            <div class="loading-spinner"></div>
+            <span style="margin-left: 10px;">Loading more events...</span>
+        </div>
+
+        <div id="allLoadedIndicator" style="display: none; text-align: center; padding: 20px; color: #999; font-style: italic;">
+            All events loaded
+        </div>
     </div>
 
     <!-- Transaction Details Popup -->
@@ -459,8 +471,13 @@
 
     <script>
         let allEvents = [];
+        let filteredEvents = [];
+        let displayedEvents = [];
         let currentSort = { field: 'tx_id', direction: 'asc' };
         let autoRefreshInterval;
+        let currentPage = 0;
+        const PAGE_SIZE = 200;
+        let isLoadingMore = false;
 
         function loadData() {
             fetch('/api/events')
@@ -524,42 +541,42 @@
             const searchTerm = document.getElementById('searchInput').value.toLowerCase();
             const typeFilter = document.getElementById('typeFilter').value;
 
-            let filtered = allEvents.filter(event => {
-                const matchesSearch = !searchTerm || 
+            filteredEvents = allEvents.filter(event => {
+                const matchesSearch = !searchTerm ||
                     event.tx_id.toString().includes(searchTerm) ||
                     (event.data && event.data.toLowerCase().includes(searchTerm)) ||
                     (event.owner && event.owner.toLowerCase().includes(searchTerm)) ||
                     (event.handler && event.handler.toLowerCase().includes(searchTerm)) ||
                     (event.execution_tx_id && event.execution_tx_id.toLowerCase().includes(searchTerm)) ||
                     event.type.toLowerCase().includes(searchTerm);
-                
+
                 const matchesType = !typeFilter || event.type === typeFilter;
-                
+
                 return matchesSearch && matchesType;
             });
 
             // Sort events
-            filtered.sort((a, b) => {
+            filteredEvents.sort((a, b) => {
                 let aVal = a[currentSort.field];
                 let bVal = b[currentSort.field];
-                
+
                 if (typeof aVal === 'string') {
                     aVal = aVal.toLowerCase();
                     bVal = bVal.toLowerCase();
                 }
-                
+
                 // Primary sort
                 let result = 0;
                 if (aVal < bVal) result = currentSort.direction === 'asc' ? -1 : 1;
                 else if (aVal > bVal) result = currentSort.direction === 'asc' ? 1 : -1;
-                
+
                 // Secondary sort by block height when sorting by ID
                 if (result === 0 && currentSort.field === 'tx_id') {
                     let aBlockHeight = a.block_height || 0;
                     let bBlockHeight = b.block_height || 0;
                     if (aBlockHeight < bBlockHeight) result = currentSort.direction === 'asc' ? -1 : 1;
                     else if (aBlockHeight > bBlockHeight) result = currentSort.direction === 'asc' ? 1 : -1;
-                    
+
                     // Tertiary sort by status when ID and block height are the same
                     if (result === 0) {
                         const statusOrder = { 'scheduled': 1, 'pending': 2, 'executed': 3, 'canceled': 4 };
@@ -569,15 +586,70 @@
                         else if (aStatus > bStatus) result = currentSort.direction === 'asc' ? 1 : -1;
                     }
                 }
-                
+
                 return result;
             });
 
-            displayEvents(filtered);
+            // Reset pagination when filtering/sorting
+            currentPage = 0;
+            displayedEvents = [];
+            loadMoreEvents();
+        }
+
+        function loadMoreEvents() {
+            if (isLoadingMore) return;
+
+            const startIndex = currentPage * PAGE_SIZE;
+            const endIndex = Math.min(startIndex + PAGE_SIZE, filteredEvents.length);
+
+            if (startIndex >= filteredEvents.length) return;
+
+            isLoadingMore = true;
+            showLoadingIndicator(true);
+
+            // Simulate slight delay for loading indicator
+            setTimeout(() => {
+                const newEvents = filteredEvents.slice(startIndex, endIndex);
+                displayedEvents = [...displayedEvents, ...newEvents];
+                currentPage++;
+
+                displayEvents(displayedEvents);
+                showLoadingIndicator(false);
+                isLoadingMore = false;
+            }, 100);
+        }
+
+        function showLoadingIndicator(show) {
+            document.getElementById('loadMoreIndicator').style.display = show ? 'block' : 'none';
+
+            // Show "all loaded" indicator if we've loaded everything and not currently loading
+            if (!show) {
+                const allLoaded = displayedEvents.length >= filteredEvents.length;
+                document.getElementById('allLoadedIndicator').style.display = allLoaded && displayedEvents.length > 0 ? 'block' : 'none';
+            } else {
+                document.getElementById('allLoadedIndicator').style.display = 'none';
+            }
+
+            // Update pagination info
+            updatePaginationInfo();
+        }
+
+        function updatePaginationInfo() {
+            const info = document.getElementById('paginationInfo');
+            if (filteredEvents.length === 0) {
+                info.textContent = 'No events to display';
+            } else {
+                info.textContent = `Showing ${displayedEvents.length} of ${filteredEvents.length} events`;
+                if (displayedEvents.length < filteredEvents.length) {
+                    info.textContent += ' (scroll down to load more)';
+                }
+            }
         }
 
         function displayEvents(events) {
             const tbody = document.getElementById('eventsBody');
+
+            // Clear table for fresh load or repopulate entire table
             tbody.innerHTML = '';
 
             // Track transaction ID groups for visual grouping when sorted by ID
@@ -686,6 +758,21 @@
         
         // Start auto-refresh
         autoRefreshInterval = setInterval(loadData, 10000);
+
+        // Add scroll event listener for infinite loading
+        window.addEventListener('scroll', function() {
+            if (isLoadingMore) return;
+
+            // Check if user is near the bottom of the page
+            const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+            const windowHeight = window.innerHeight;
+            const documentHeight = document.documentElement.scrollHeight;
+
+            // Load more when user is within 200px of the bottom
+            if (scrollTop + windowHeight >= documentHeight - 200) {
+                loadMoreEvents();
+            }
+        });
         
         // Transaction query functions
         function queryTransactionDetails(executionTxId, blockHeight) {
