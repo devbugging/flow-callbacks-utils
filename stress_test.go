@@ -40,6 +40,7 @@ type StressTest struct {
 	account        *accounts.Account
 	serviceAccount *flow.Account
 	scheduleScript string
+	fundScript     string
 
 	keyCount        int
 	testAccount     *flow.Account
@@ -69,16 +70,21 @@ func NewStressTest(t *testing.T) *StressTest {
 	}
 	st.startBlockHeight = startHeight
 
+	// Load the schedule and fund scripts first
+	err = st.loadScheduleScript()
+	if err != nil {
+		t.Fatalf("Failed to load schedule script: %v", err)
+	}
+
+	err = st.loadFundScript()
+	if err != nil {
+		t.Fatalf("Failed to load fund script: %v", err)
+	}
+
 	st.keyCount = 20
 	err = st.createTestAccountMultipleKeys()
 	if err != nil {
 		t.Fatalf("Failed to create test account with multiple keys: %v", err)
-	}
-
-	// Load the schedule script
-	err = st.loadScheduleScript()
-	if err != nil {
-		t.Fatalf("Failed to load schedule script: %v", err)
 	}
 
 	t.Logf("Starting stress test from block height %d with %d keys available", startHeight, st.keyCount)
@@ -176,30 +182,7 @@ func (st *StressTest) createTestAccountMultipleKeys() error {
 func (st *StressTest) fundTestAccount() error {
 	st.t.Logf("Funding test account %s with 1.0 Flow tokens", st.testAccount.Address.Hex())
 
-	// Create Flow token transfer script (Cadence 1.0 syntax)
-	fundScript := `
-import FungibleToken from 0x9a0766d93b6608b7
-import FlowToken from 0x7e60df042a9c0868
-
-transaction(amount: UFix64, to: Address) {
-    let vault: @{FungibleToken.Vault}
-
-    prepare(signer: auth(BorrowValue) &Account) {
-        self.vault <- signer.storage.borrow<auth(FungibleToken.Withdraw) &FlowToken.Vault>(
-            from: /storage/flowTokenVault
-        )!.withdraw(amount: amount)
-    }
-
-    execute {
-        let recipient = getAccount(to)
-        let receiverRef = recipient.capabilities.get<&{FungibleToken.Receiver}>(
-            /public/flowTokenReceiver
-        ).borrow() ?? panic("Unable to borrow receiver reference")
-
-        receiverRef.deposit(from: <-self.vault)
-    }
-}
-`
+	// Use the loaded fund script
 
 	// Prepare transfer arguments (1.0 Flow = 100000000 in Flow's 8-decimal precision)
 	args := []cadence.Value{
@@ -209,7 +192,7 @@ transaction(amount: UFix64, to: Address) {
 
 	// Create script
 	script := flowkit.Script{
-		Code: []byte(fundScript),
+		Code: []byte(st.fundScript),
 		Args: args,
 	}
 
@@ -249,6 +232,15 @@ func (st *StressTest) loadScheduleScript() error {
 		return fmt.Errorf("failed to read schedule script: %w", err)
 	}
 	st.scheduleScript = string(scriptBytes)
+	return nil
+}
+
+func (st *StressTest) loadFundScript() error {
+	scriptBytes, err := os.ReadFile("fund_account_testnet.cdc")
+	if err != nil {
+		return fmt.Errorf("failed to read fund script: %w", err)
+	}
+	st.fundScript = string(scriptBytes)
 	return nil
 }
 
