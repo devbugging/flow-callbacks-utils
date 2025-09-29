@@ -26,6 +26,13 @@ import (
 	"github.com/spf13/afero"
 )
 
+// Priority constants for callback scheduling
+const (
+	PriorityHigh   = uint8(0) // Highest priority
+	PriorityMedium = uint8(1) // Medium priority
+	PriorityLow    = uint8(2) // Lowest priority
+)
+
 type StressTest struct {
 	t                   *testing.T
 	startBlockHeight    uint64
@@ -657,7 +664,7 @@ func TestSingleTransactionSanity(t *testing.T) {
 
 	// Schedule a single callback
 	startTime := time.Now()
-	callback, err := st.scheduleCallbackWithNextKey(testData, 1, futureSeconds, "100")
+	callback, err := st.scheduleCallbackWithNextKey(testData, PriorityMedium, futureSeconds, "100")
 	scheduleDuration := time.Since(startTime)
 
 	if err != nil {
@@ -731,7 +738,7 @@ func TestSlotSaturation(t *testing.T) {
 		data := fmt.Sprintf("slot-saturation-high-%d-%d", i, time.Now().UnixNano())
 		highRequests = append(highRequests, ScheduleRequest{
 			Data:          data,
-			Priority:      0,
+			Priority:      PriorityHigh,
 			FutureSeconds: futureSeconds,
 			Effort:        highPriorityEffort,
 		})
@@ -765,7 +772,7 @@ func TestSlotSaturation(t *testing.T) {
 		data := fmt.Sprintf("slot-saturation-medium-%d-%d", i, time.Now().UnixNano())
 		mediumRequests = append(mediumRequests, ScheduleRequest{
 			Data:          data,
-			Priority:      1,
+			Priority:      PriorityMedium,
 			FutureSeconds: futureSeconds,
 			Effort:        mediumPriorityEffort,
 		})
@@ -790,7 +797,7 @@ func TestSlotSaturation(t *testing.T) {
 	// Try to schedule one more high priority - should fail
 	t.Logf("Attempting to schedule additional high priority transaction (should fail)")
 	data := fmt.Sprintf("slot-saturation-overflow-%d", time.Now().UnixNano())
-	_, err := st.scheduleCallbackWithNextKey(data, 0, futureSeconds, "1000")
+	_, err := st.scheduleCallbackWithNextKey(data, PriorityHigh, futureSeconds, "1000")
 	if err == nil {
 		t.Errorf("Expected slot saturation but was able to schedule additional transaction")
 	} else {
@@ -828,8 +835,9 @@ func TestBurstScheduling(t *testing.T) {
 
 	// Create burst requests with mixed priorities and random parameters
 	var burstRequests []ScheduleRequest
+	priorities := []uint8{PriorityHigh, PriorityMedium, PriorityLow}
 	for i := 0; i < burstSize; i++ {
-		priority := uint8(i % 3)                            // Mix priorities (0, 1, 2)
+		priority := priorities[i%3]                         // Mix priorities
 		effort := fmt.Sprintf("%d", 100+mathrand.Intn(900)) // Random effort 100-999
 		data := fmt.Sprintf("burst-%d-%d", i, time.Now().UnixNano())
 		timeVariation := mathrand.Intn(5) // Spread execution times over 5 seconds
@@ -888,12 +896,13 @@ func TestCollectionLimits(t *testing.T) {
 	var collectionRequests []ScheduleRequest
 	for i := 0; i < targetCount; i++ {
 		data := fmt.Sprintf("collection-limit-%d-%d", i, time.Now().UnixNano())
+		priorities := []uint8{PriorityHigh, PriorityMedium, PriorityLow}
 
 		collectionRequests = append(collectionRequests, ScheduleRequest{
 			Data:          data,
-			Priority:      uint8(i % 3),  // Mix priorities
-			FutureSeconds: futureSeconds, // Same timestamp for all
-			Effort:        "100",         // Small effort to ensure we hit transaction count limit first
+			Priority:      priorities[i%3], // Mix priorities
+			FutureSeconds: futureSeconds,   // Same timestamp for all
+			Effort:        "100",           // Small effort to ensure we hit transaction count limit first
 		})
 	}
 
@@ -962,7 +971,7 @@ func TestPriorityStarvation(t *testing.T) {
 		data := fmt.Sprintf("starvation-high-%d-%d", i, time.Now().UnixNano())
 		highRequests = append(highRequests, ScheduleRequest{
 			Data:          data,
-			Priority:      0,
+			Priority:      PriorityHigh,
 			FutureSeconds: futureSeconds,
 			Effort:        "1000",
 		})
@@ -988,7 +997,7 @@ func TestPriorityStarvation(t *testing.T) {
 	t.Logf("Attempting to schedule medium priority transactions (should get different slot)")
 
 	mediumData := fmt.Sprintf("starvation-medium-%d", time.Now().UnixNano())
-	mediumCallback, err := st.scheduleCallbackWithNextKey(mediumData, 1, futureSeconds, "6000")
+	mediumCallback, err := st.scheduleCallbackWithNextKey(mediumData, PriorityMedium, futureSeconds, "6000")
 	if err != nil {
 		t.Logf("Failed to schedule medium priority: %v", err)
 	} else {
@@ -1005,7 +1014,7 @@ func TestPriorityStarvation(t *testing.T) {
 	t.Logf("Attempting to schedule low priority transactions (should get rescheduled)")
 
 	lowData := fmt.Sprintf("starvation-low-%d", time.Now().UnixNano())
-	lowCallback, err := st.scheduleCallbackWithNextKey(lowData, 2, futureSeconds, "1000")
+	lowCallback, err := st.scheduleCallbackWithNextKey(lowData, PriorityLow, futureSeconds, "1000")
 	if err != nil {
 		t.Logf("Failed to schedule low priority: %v", err)
 	} else {
@@ -1031,11 +1040,11 @@ func TestPriorityStarvation(t *testing.T) {
 		for _, execID := range executedIDs {
 			if callback.TxID == execID {
 				switch callback.Priority {
-				case 0:
+				case PriorityHigh:
 					highExecuted++
-				case 1:
+				case PriorityMedium:
 					mediumExecuted++
-				case 2:
+				case PriorityLow:
 					lowExecuted++
 				}
 				break
@@ -1092,7 +1101,7 @@ func TestDataPayloadStress(t *testing.T) {
 
 		payloadRequests = append(payloadRequests, ScheduleRequest{
 			Data:          data,
-			Priority:      1,
+			Priority:      PriorityMedium,
 			FutureSeconds: futureSeconds + test.size/10, // Spread execution times
 			Effort:        "100",
 		})
