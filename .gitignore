@@ -5,3 +5,5 @@ imports
 .env
 db.json
 flow.json
+monitor-service/db.json
+monitor-service/flow.json
