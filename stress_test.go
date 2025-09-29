@@ -1,3 +1,27 @@
+// FlowTransactionScheduler Stress Test Suite
+//
+// This package contains comprehensive stress tests for the FlowTransactionScheduler
+// using flowkit v2 for efficient transaction submission and event monitoring.
+//
+// Test Suites:
+// - Test Suite 0: Single Transaction Sanity Test (validates basic functionality)
+// - Test Suite 1: Slot Saturation Test (tests capacity limits)
+// - Test Suite 2: Burst Scheduling Test (tests concurrent throughput)
+// - Test Suite 4: Collection Limit Test (tests transaction count limits)
+// - Test Suite 5: Priority Starvation Test (tests priority rescheduling)
+// - Test Suite 7: Data Payload Stress Test (tests data size limits)
+//
+// Usage:
+//   go test -run TestSingleTransactionSanity  # Quick sanity check
+//   go test -run TestSlotSaturation          # Test slot capacity
+//   go test -run TestBurstScheduling         # Test concurrent load
+//
+// Features:
+// - Concurrent transaction scheduling with controlled concurrency
+// - Proper sequence number management for parallel operations
+// - Event-based execution tracking and verification
+// - Comprehensive error handling and performance metrics
+//
 package main
 
 import (
@@ -521,6 +545,73 @@ type ScheduleRequest struct {
 	Priority      uint8
 	FutureSeconds int
 	Effort        string
+}
+
+// Test Suite 0: Sanity Test - Single Transaction
+func TestSingleTransactionSanity(t *testing.T) {
+	st := NewStressTest(t)
+
+	futureSeconds := 30 // Schedule 30 seconds in future
+	testData := fmt.Sprintf("sanity-test-%d", time.Now().UnixNano())
+
+	t.Logf("Running sanity test: scheduling single callback with data '%s'", testData)
+
+	// Schedule a single callback
+	startTime := time.Now()
+	callback, err := st.scheduleCallbackWithSequence(testData, 1, futureSeconds, "100")
+	scheduleDuration := time.Since(startTime)
+
+	if err != nil {
+		t.Fatalf("Failed to schedule sanity test callback: %v", err)
+	}
+
+	t.Logf("Successfully scheduled callback with ID %d in %v", callback.TxID, scheduleDuration)
+	t.Logf("Callback scheduled for timestamp: %.0f", callback.Timestamp)
+
+	// Wait for execution
+	t.Logf("Waiting for callback execution...")
+	err = st.waitAndCollectExecutedCallbacks(time.Duration(futureSeconds+15) * time.Second)
+	if err != nil {
+		t.Errorf("Failed to collect executed callbacks: %v", err)
+	}
+
+	// Verify execution
+	executedIDs := st.getExecutedCallbackIDs()
+	scheduledCallbacks := st.getScheduledCallbacks()
+
+	t.Logf("Sanity Test Results:")
+	t.Logf("- Scheduled: %d callbacks", len(scheduledCallbacks))
+	t.Logf("- Executed: %d callbacks", len(executedIDs))
+
+	if len(scheduledCallbacks) != 1 {
+		t.Errorf("Expected 1 scheduled callback, got %d", len(scheduledCallbacks))
+	}
+
+	if len(executedIDs) != 1 {
+		t.Errorf("Expected 1 executed callback, got %d", len(executedIDs))
+	} else {
+		if executedIDs[0] == callback.TxID {
+			t.Logf("✅ Sanity test PASSED: Callback %d executed successfully", callback.TxID)
+		} else {
+			t.Errorf("❌ Sanity test FAILED: Expected callback %d to execute, but got %d", callback.TxID, executedIDs[0])
+		}
+	}
+
+	// Additional validation: Check if our specific callback was executed
+	found := false
+	for _, scheduled := range scheduledCallbacks {
+		if scheduled.TxID == callback.TxID && scheduled.Data == testData {
+			found = true
+			t.Logf("✅ Callback data verification PASSED: Found callback with correct data '%s'", testData)
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("❌ Callback data verification FAILED: Could not find callback with data '%s'", testData)
+	}
+
+	t.Logf("Sanity test completed - This validates the stress test suite is working correctly")
 }
 
 // Test Suite 1: Slot Saturation Test
