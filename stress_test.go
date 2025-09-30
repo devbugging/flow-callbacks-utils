@@ -697,9 +697,9 @@ func TestSingleTransactionSanity(t *testing.T) {
 		t.Errorf("Expected 1 executed callback, got %d", len(executedIDs))
 	} else {
 		if executedIDs[0] == callback.TxID {
-			t.Logf("✅ Sanity test PASSED: Callback %d executed successfully", callback.TxID)
+			t.Logf("Sanity test PASSED: Callback %d executed successfully", callback.TxID)
 		} else {
-			t.Errorf("❌ Sanity test FAILED: Expected callback %d to execute, but got %d", callback.TxID, executedIDs[0])
+			t.Errorf("Sanity test FAILED: Expected callback %d to execute, but got %d", callback.TxID, executedIDs[0])
 		}
 	}
 
@@ -708,16 +708,14 @@ func TestSingleTransactionSanity(t *testing.T) {
 	for _, scheduled := range scheduledCallbacks {
 		if scheduled.TxID == callback.TxID && scheduled.Data == testData {
 			found = true
-			t.Logf("✅ Callback data verification PASSED: Found callback with correct data '%s'", testData)
+			t.Logf("Callback data verification PASSED: Found callback with correct data '%s'", testData)
 			break
 		}
 	}
 
 	if !found {
-		t.Errorf("❌ Callback data verification FAILED: Could not find callback with data '%s'", testData)
+		t.Errorf("Callback data verification FAILED: Could not find callback with data '%s'", testData)
 	}
-
-	t.Logf("Sanity test completed - This validates the stress test suite is working correctly")
 }
 
 // Test Suite 1: Slot Saturation Test
